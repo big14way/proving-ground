@@ -1,0 +1,11 @@
+# Private build notes
+BUILDSPEC.md
+
+# Foundry
+out/
+cache/
+broadcast/
+
+# Local
+.env
+.DS_Store
