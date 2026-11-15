@@ -4,6 +4,8 @@ pragma solidity ^0.8.26;
 import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -22,6 +24,7 @@ import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 
 import {IProvingGround} from "./interfaces/IProvingGround.sol";
 import {Oracle} from "./libraries/Oracle.sol";
+import {Mandate} from "./libraries/Mandate.sol";
 import {ScoreMath} from "./libraries/ScoreMath.sol";
 
 /// @title ProvingGroundHook
@@ -32,7 +35,9 @@ import {ScoreMath} from "./libraries/ScoreMath.sol";
 ///    growth while some liquidity references it, so the dust makes the pool account for the range.
 ///  - Fees are `virtual liquidity x fee growth inside the range`, read lazily when the score is asked for.
 ///  - The only work done during a swap is one oracle observation per block.
-contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround {
+/// A shadow is moved only by an instruction its curator signed (EIP-712), and only within the mandate:
+/// range width, a cooldown, and a pool price close to its time-weighted average.
+contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround, EIP712 {
     using StateLibrary for IPoolManager;
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
@@ -47,6 +52,12 @@ contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround {
     uint16 public immutable ORACLE_CAPACITY;
     uint16 public immutable SHADOW_MAX_POOL_SHARE_BPS;
     uint24 public immutable DEFAULT_DYNAMIC_FEE;
+    uint24 public immutable MIN_WIDTH_TICKS;
+    uint24 public immutable MAX_WIDTH_TICKS;
+    uint24 public immutable MAX_DEVIATION_TICKS;
+    uint32 public immutable MIN_REBALANCE_INTERVAL;
+    uint32 public immutable MIN_SHADOW_AGE;
+    uint128 public immutable BOND_MIN;
 
     /// @notice Number of shadows ever opened. Shadow ids run from 1.
     uint256 public shadowCount;
@@ -54,20 +65,36 @@ contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround {
     /// @notice Tokens set aside to fund dust positions, per currency. Anyone can add to it.
     mapping(Currency => uint256) public dustReserve;
 
+    /// @notice The next nonce a curator's signed intent must carry.
+    mapping(address => uint256) public nonces;
+
+    /// @notice The open shadow a curator has on a pool, or zero. One at a time per pool.
+    mapping(address => mapping(PoolId => uint256)) public activeShadowOf;
+
+    /// @notice Shadows a curator address has opened, and how many of those it closed without graduating.
+    mapping(address => CuratorRecord) public curatorRecord;
+
     mapping(PoolId => PoolKey) internal _poolKeys;
     mapping(PoolId => Oracle.State) internal _oracles;
     mapping(uint256 => Shadow) internal _shadows;
     mapping(uint256 => Score) internal _finalScores;
 
-    constructor(IPoolManager manager, Config memory config) BaseHook(manager) {
+    constructor(IPoolManager manager, Config memory config) BaseHook(manager) EIP712("ProvingGround", "1") {
         if (
             config.twapWindow == 0 || config.oracleCapacity < 2 || config.shadowMaxPoolShareBps == 0
                 || config.shadowMaxPoolShareBps > ScoreMath.BPS || config.defaultDynamicFee > LPFeeLibrary.MAX_LP_FEE
+                || config.minWidthTicks == 0 || config.minWidthTicks > config.maxWidthTicks
         ) revert InvalidConfig();
         TWAP_WINDOW = config.twapWindow;
         ORACLE_CAPACITY = config.oracleCapacity;
         SHADOW_MAX_POOL_SHARE_BPS = config.shadowMaxPoolShareBps;
         DEFAULT_DYNAMIC_FEE = config.defaultDynamicFee;
+        MIN_WIDTH_TICKS = config.minWidthTicks;
+        MAX_WIDTH_TICKS = config.maxWidthTicks;
+        MAX_DEVIATION_TICKS = config.maxDeviationTicks;
+        MIN_REBALANCE_INTERVAL = config.minRebalanceInterval;
+        MIN_SHADOW_AGE = config.minShadowAge;
+        BOND_MIN = config.bondMin;
     }
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory permissions) {
@@ -116,27 +143,36 @@ contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround {
         emit DustFunded(currency, msg.sender, amount);
     }
 
-    /// @notice Opens a shadow position. No capital is taken from the caller.
+    /// @notice Opens a shadow position. The position itself needs no capital; the caller posts a bond
+    /// in native currency (`msg.value`, at least `BOND_MIN`) that is returned once the shadow is closed
+    /// and `MIN_SHADOW_AGE` has passed since it was opened. One open shadow per address per pool.
     /// @param virtualLiquidity Liquidity of the virtual position, in the pool's liquidity units.
     function openShadow(PoolId poolId, int24 tickLower, int24 tickUpper, uint128 virtualLiquidity)
         external
+        payable
         returns (uint256 shadowId)
     {
         PoolKey memory key = _requireKey(poolId);
         if (virtualLiquidity == 0) revert ZeroLiquidity();
+        if (msg.value < BOND_MIN) revert BondTooSmall();
+        if (activeShadowOf[msg.sender][poolId] != 0) revert ShadowAlreadyOpen();
 
         (uint160 sqrtPriceX96, int24 tick,,) = poolManager.getSlot0(poolId);
-        _requireInRange(tick, tickLower, tickUpper);
+        Mandate.checkRange(tickLower, tickUpper, tick, key.tickSpacing, MIN_WIDTH_TICKS, MAX_WIDTH_TICKS);
         uint128 active = poolManager.getLiquidity(poolId);
         _requireSize(virtualLiquidity, active);
 
         shadowId = ++shadowCount;
+        activeShadowOf[msg.sender][poolId] = shadowId;
+        curatorRecord[msg.sender].shadowsOpened += 1;
+
         Shadow storage s = _shadows[shadowId];
         s.poolId = poolId;
         s.curator = msg.sender;
         s.openedAt = uint48(block.timestamp);
         s.liquidity = virtualLiquidity;
         s.openLiquidity = active;
+        s.bond = msg.value.toUint128();
 
         (uint256 amount0, uint256 amount1) = ScoreMath.amountsFor(sqrtPriceX96, tickLower, tickUpper, virtualLiquidity);
         s.hold0 = amount0.toUint128();
@@ -154,16 +190,27 @@ contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround {
         emit ShadowOpened(shadowId, poolId, msg.sender, tickLower, tickUpper, virtualLiquidity, s.benchLiquidity);
     }
 
-    /// @notice Moves a shadow to a new range, charging the modelled cost of the swap that would need.
-    /// @dev If the new range would hold more liquidity than the size cap allows, the position is
-    /// placed at the cap and the remainder is kept as idle token1, which earns nothing.
-    function rebalanceShadow(uint256 shadowId, int24 tickLower, int24 tickUpper) external {
-        Shadow storage s = _openShadow(shadowId);
-        if (msg.sender != s.curator) revert NotCurator();
-        _rebalanceShadow(s, shadowId, tickLower, tickUpper);
+    /// @notice Executes a curator's signed instruction to move their position to a new range.
+    /// Anyone may submit it. The move must satisfy the mandate: range width and tick grid, the
+    /// cooldown, and a pool price within `MAX_DEVIATION_TICKS` of its time-weighted average.
+    /// @dev For a shadow the move is virtual and is charged the modelled cost of the swap a real
+    /// position would need. If the new range would hold more liquidity than the size cap allows, the
+    /// position is placed at the cap and the remainder is kept as idle token1, which earns nothing.
+    function rebalance(RebalanceIntent calldata intent, bytes calldata signature) external {
+        if (intent.live) revert LiveNotSupported();
+        Shadow storage s = _openShadow(intent.subjectId);
+        if (PoolId.unwrap(intent.poolId) != PoolId.unwrap(s.poolId)) revert WrongPool();
+        _useIntent(s.curator, intent, signature);
+        _rebalanceShadow(s, intent.subjectId, intent.tickLower, intent.tickUpper);
     }
 
-    /// @notice Closes a shadow and freezes its score at the time-weighted price.
+    /// @notice Cancels the caller's outstanding signed intents by moving their nonce forward.
+    function skipNonce() external {
+        emit NonceSkipped(msg.sender, nonces[msg.sender]++);
+    }
+
+    /// @notice Closes a shadow and freezes its score at the time-weighted price. The bond is returned
+    /// here if `MIN_SHADOW_AGE` has passed; otherwise it waits for `withdrawBond`.
     function closeShadow(uint256 shadowId) external {
         Shadow storage s = _openShadow(shadowId);
         if (msg.sender != s.curator) revert NotCurator();
@@ -171,14 +218,59 @@ contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround {
         Score memory final_ = _score(s, _twapSqrtPrice(s.poolId));
         _finalScores[shadowId] = final_;
         s.closedAt = uint48(block.timestamp);
+        delete activeShadowOf[msg.sender][s.poolId];
+        curatorRecord[msg.sender].shadowsClosedWithoutGraduating += 1;
         _moveDust(s, shadowId, true, 0, 0);
         emit ShadowClosed(shadowId, final_.alphaBps, final_.alphaVsHoldBps, final_.navConservative);
+
+        if (block.timestamp >= uint256(s.openedAt) + MIN_SHADOW_AGE) _returnBond(s, shadowId);
+    }
+
+    /// @notice Returns the bond of a closed shadow to its curator once the lock has passed.
+    function withdrawBond(uint256 shadowId) external {
+        Shadow storage s = _shadows[shadowId];
+        if (s.curator == address(0)) revert UnknownShadow();
+        uint256 unlocksAt = uint256(s.openedAt) + MIN_SHADOW_AGE;
+        if (s.closedAt == 0 || block.timestamp < unlocksAt) revert BondLocked(unlocksAt);
+        if (s.bond == 0) revert NoBond();
+        _returnBond(s, shadowId);
+    }
+
+    function _returnBond(Shadow storage s, uint256 shadowId) internal {
+        uint256 amount = s.bond;
+        if (amount == 0) return;
+        address curator = s.curator;
+        s.bond = 0;
+        (bool sent,) = curator.call{value: amount}("");
+        if (!sent) revert BondTransferFailed();
+        emit BondReturned(shadowId, curator, amount);
+    }
+
+    /// @dev Checks deadline, nonce and signature, then spends the nonce.
+    function _useIntent(address curator, RebalanceIntent calldata intent, bytes calldata signature) internal {
+        if (block.timestamp > intent.deadline) revert IntentExpired();
+        if (intent.nonce != nonces[curator]) revert BadNonce();
+        if (!SignatureChecker.isValidSignatureNow(curator, intentDigest(intent), signature)) revert BadSignature();
+        nonces[curator] = intent.nonce + 1;
+        emit IntentUsed(curator, intent.nonce, msg.sender);
+    }
+
+    /// @dev The mandate checks shared by every placement after the first.
+    function _checkMandate(Shadow storage s, PoolId poolId, int24 tick, int24 tickLower, int24 tickUpper)
+        internal
+        view
+    {
+        Mandate.checkRange(tickLower, tickUpper, tick, _poolKeys[poolId].tickSpacing, MIN_WIDTH_TICKS, MAX_WIDTH_TICKS);
+        Mandate.checkCooldown(
+            block.timestamp, s.rebalances == 0 ? s.openedAt : s.lastRebalanceAt, MIN_REBALANCE_INTERVAL
+        );
+        Mandate.checkDeviation(tick, _twapTick(poolId, tick), MAX_DEVIATION_TICKS);
     }
 
     function _rebalanceShadow(Shadow storage s, uint256 shadowId, int24 tickLower, int24 tickUpper) internal {
         PoolId poolId = s.poolId;
         (uint160 sqrtPriceX96, int24 tick,, uint24 lpFee) = poolManager.getSlot0(poolId);
-        _requireInRange(tick, tickLower, tickUpper);
+        _checkMandate(s, poolId, tick, tickLower, tickUpper);
         uint128 active = poolManager.getLiquidity(poolId);
         if (active == 0) revert NoActiveLiquidity();
 
@@ -232,7 +324,12 @@ contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround {
     function twapTick(PoolId poolId) public view returns (int24) {
         _requireKey(poolId);
         (, int24 tick,,) = poolManager.getSlot0(poolId);
-        return _oracles[poolId].twapTick(uint48(block.timestamp), TWAP_WINDOW, tick, ORACLE_CAPACITY);
+        return _twapTick(poolId, tick);
+    }
+
+    /// @notice The EIP-712 digest a curator signs to authorize `intent`.
+    function intentDigest(RebalanceIntent calldata intent) public view returns (bytes32) {
+        return _hashTypedDataV4(Mandate.structHash(intent));
     }
 
     /// @notice A shadow's score at the time-weighted price. For a closed shadow, the score frozen at close.
@@ -323,6 +420,10 @@ contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround {
         sc.alphaVsHoldBps = ScoreMath.alphaBps(sc.navConservative, sc.navHold);
     }
 
+    function _twapTick(PoolId poolId, int24 tick) internal view returns (int24) {
+        return _oracles[poolId].twapTick(uint48(block.timestamp), TWAP_WINDOW, tick, ORACLE_CAPACITY);
+    }
+
     function _twapSqrtPrice(PoolId poolId) internal view returns (uint160) {
         return TickMath.getSqrtPriceAtTick(twapTick(poolId));
     }
@@ -336,10 +437,6 @@ contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround {
     function _requireKey(PoolId poolId) internal view returns (PoolKey memory key) {
         key = _poolKeys[poolId];
         if (key.tickSpacing == 0) revert PoolNotRegistered();
-    }
-
-    function _requireInRange(int24 tick, int24 tickLower, int24 tickUpper) internal pure {
-        if (tick < tickLower || tick >= tickUpper) revert RangeMustContainTick();
     }
 
     function _requireSize(uint128 liquidity, uint128 active) internal view {

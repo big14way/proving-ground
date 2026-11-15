@@ -19,7 +19,8 @@ import {IProvingGround} from "../src/interfaces/IProvingGround.sol";
 /// the same swaps. Errors are logged in parts per million (10,000 ppm = 1%).
 ///
 /// The hook is deployed with no size cap here so that sizes far above the supported 1% can be
-/// measured and reported. Only the 0.1% and 1% sizes carry pass/fail limits.
+/// measured and reported. Only the 0.1% and 1% sizes carry pass/fail limits. The mandate limits are
+/// switched off too (they have their own tests), so a shadow can follow the real position anywhere.
 abstract contract AccuracySuite is TwinPools {
     using StateLibrary for IPoolManager;
     using EasyPosm for IPositionManager;
@@ -37,11 +38,17 @@ abstract contract AccuracySuite is TwinPools {
     uint256 internal idle0;
     uint256 internal idle1;
 
+    /// @dev A rebalance reads the time-weighted price, so the pools start one oracle window old.
+    function _setUpAccuracy(uint8 decimals0, uint8 decimals1, int24 centerTick, uint128 liquidityScale) internal {
+        _setUpTwin(decimals0, decimals1, centerTick, liquidityScale, _looseConfig(10_000));
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+    }
+
     // ------------------------------------------------------------------ fees
 
     function _feeRun(uint256 shareBps, bool inRange) internal returns (int256 rawPpm, int256 conservativePpm) {
         uint128 liquidity = _activeShare(shareBps);
-        uint256 shadowId = hook.openShadow(idA, center - 300, center + 300, liquidity);
+        uint256 shadowId = _openAs(curator, center - 300, center + 300, liquidity);
         (tokenId,) = _mint(keyB, center - 300, center + 300, liquidity);
 
         if (inRange) _pingPong(0, 300);
@@ -143,14 +150,14 @@ abstract contract AccuracySuite is TwinPools {
     function _recenterBoth(uint256 shadowId) internal {
         (, int24 tick,,) = poolManager.getSlot0(idA);
         int24 mid = (tick / TS) * TS;
-        hook.rebalanceShadow(shadowId, mid - 300, mid + 300);
+        _rebalance(shadowId, mid - 300, mid + 300);
         _realRebalance(mid - 300, mid + 300);
         console2.log("  rebalanced around tick, relative to start:", mid - center);
     }
 
     function _valueRun(uint256 shareBps) internal returns (int256 errorPpm) {
         uint128 liquidity = _activeShare(shareBps);
-        uint256 shadowId = hook.openShadow(idA, center - 300, center + 300, liquidity);
+        uint256 shadowId = _openAs(curator, center - 300, center + 300, liquidity);
         (tokenId,) = _mint(keyB, center - 300, center + 300, liquidity);
         realLiquidity = liquidity;
 
@@ -204,7 +211,7 @@ abstract contract AccuracySuite is TwinPools {
 
     /// @dev The hook's benchmark is a virtual full-range position. Pool B holds that position for real.
     function _benchmarkRun(bool inRange) internal {
-        uint256 shadowId = hook.openShadow(idA, center - 300, center + 300, _activeShare(100));
+        uint256 shadowId = _openAs(curator, center - 300, center + 300, _activeShare(100));
         IProvingGround.Shadow memory s = hook.getShadow(shadowId);
 
         (uint160 sqrtOpen,,,) = poolManager.getSlot0(idA);
@@ -259,20 +266,20 @@ abstract contract AccuracySuite is TwinPools {
 /// @notice Two 18-decimal tokens at a price of 1.
 contract Accuracy18x18Test is AccuracySuite {
     function setUp() public {
-        _setUpTwin(18, 18, 0, 1e18, 10_000);
+        _setUpAccuracy(18, 18, 0, 1e18);
     }
 }
 
 /// @notice A 6-decimal token0 against an 18-decimal token1, priced like 3,000 token0 per token1.
 contract Accuracy6x18Test is AccuracySuite {
     function setUp() public {
-        _setUpTwin(6, 18, 196260, 1e13, 10_000);
+        _setUpAccuracy(6, 18, 196260, 1e13);
     }
 }
 
 /// @notice An 18-decimal token0 against a 6-decimal token1, priced like 3,000 token1 per token0.
 contract Accuracy18x6Test is AccuracySuite {
     function setUp() public {
-        _setUpTwin(18, 6, -196260, 1e13, 10_000);
+        _setUpAccuracy(18, 6, -196260, 1e13);
     }
 }

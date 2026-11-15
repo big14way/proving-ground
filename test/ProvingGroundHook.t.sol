@@ -21,7 +21,8 @@ import {IProvingGround} from "../src/interfaces/IProvingGround.sol";
 import {Oracle} from "../src/libraries/Oracle.sol";
 
 /// @notice Behaviour of the hook itself: pool registration, the oracle wired into swaps, the shadow
-/// lifecycle and its guards, dust accounting, and swap gas.
+/// lifecycle and its guards, the bond and the one-shadow rule, dust accounting, and swap gas.
+/// The signed-intent and mandate checks have their own file, `Mandate.t.sol`.
 contract ProvingGroundHookTest is TwinPools {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
@@ -30,11 +31,16 @@ contract ProvingGroundHookTest is TwinPools {
 
     function setUp() public {
         // Default size cap: a shadow may be at most 1% of the pool's active liquidity.
-        _setUpTwin(18, 18, 0, 1e18, 100);
+        _setUpTwin(18, 18, 0, 1e18, _config(100));
     }
 
     function _open() internal returns (uint256 shadowId) {
-        shadowId = hook.openShadow(idA, -300, 300, _activeShare(100));
+        shadowId = _openAs(curator, -300, 300, _activeShare(100));
+    }
+
+    function _close(uint256 shadowId) internal {
+        vm.prank(curator);
+        hook.closeShadow(shadowId);
     }
 
     function _dustLiquidity(uint256 shadowId, int24 lo, int24 hi) internal view returns (uint128) {
@@ -70,15 +76,31 @@ contract ProvingGroundHookTest is TwinPools {
         assertEq(hook.ORACLE_CAPACITY(), ORACLE_CAPACITY);
         assertEq(hook.SHADOW_MAX_POOL_SHARE_BPS(), 100);
         assertEq(hook.DEFAULT_DYNAMIC_FEE(), FEE);
+        assertEq(hook.MIN_WIDTH_TICKS(), MIN_WIDTH);
+        assertEq(hook.MAX_WIDTH_TICKS(), MAX_WIDTH);
+        assertEq(hook.MAX_DEVIATION_TICKS(), MAX_DEVIATION);
+        assertEq(hook.MIN_REBALANCE_INTERVAL(), COOLDOWN);
+        assertEq(hook.MIN_SHADOW_AGE(), MIN_AGE);
+        assertEq(hook.BOND_MIN(), BOND);
     }
 
     function test_config_invalidReverts() public {
         address at = address(uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG) ^ (uint160(0x7777) << 144));
-        IProvingGround.Config memory bad = IProvingGround.Config({
-            twapWindow: 0, oracleCapacity: 720, shadowMaxPoolShareBps: 100, defaultDynamicFee: 3000
-        });
+
+        IProvingGround.Config memory noWindow = _config(100);
+        noWindow.twapWindow = 0;
         vm.expectRevert();
-        deployCodeTo("ProvingGroundHook.sol:ProvingGroundHook", abi.encode(poolManager, bad), at);
+        deployCodeTo("ProvingGroundHook.sol:ProvingGroundHook", abi.encode(poolManager, noWindow), at);
+
+        IProvingGround.Config memory zeroWidth = _config(100);
+        zeroWidth.minWidthTicks = 0;
+        vm.expectRevert();
+        deployCodeTo("ProvingGroundHook.sol:ProvingGroundHook", abi.encode(poolManager, zeroWidth), at);
+
+        IProvingGround.Config memory minAboveMax = _config(100);
+        minAboveMax.minWidthTicks = MAX_WIDTH + 1;
+        vm.expectRevert();
+        deployCodeTo("ProvingGroundHook.sol:ProvingGroundHook", abi.encode(poolManager, minAboveMax), at);
     }
 
     function test_initialize_registersPoolAndStartsOracle() public view {
@@ -164,13 +186,15 @@ contract ProvingGroundHookTest is TwinPools {
     function test_open_recordsTheShadow() public {
         uint128 liquidity = _activeShare(100);
         uint128 active = poolManager.getLiquidity(idA);
-        uint256 shadowId = hook.openShadow(idA, -300, 300, liquidity);
+        uint256 shadowId = _openAs(curator, -300, 300, liquidity);
         assertEq(shadowId, 1);
         assertEq(hook.shadowCount(), 1);
+        assertEq(hook.activeShadowOf(curator, idA), shadowId);
 
         IProvingGround.Shadow memory s = hook.getShadow(shadowId);
         assertEq(PoolId.unwrap(s.poolId), PoolId.unwrap(idA));
-        assertEq(s.curator, address(this));
+        assertEq(s.curator, curator);
+        assertEq(s.bond, BOND);
         assertEq(s.tickLower, -300);
         assertEq(s.tickUpper, 300);
         assertEq(s.liquidity, liquidity);
@@ -193,10 +217,9 @@ contract ProvingGroundHookTest is TwinPools {
         assertApproxEqRel(uint256(s.benchLiquidity) * 2, e0 + e1, 1e12);
     }
 
-    function test_open_takesNothingFromTheCurator_andPlacesDust() public {
-        uint256 liquidity = _activeShare(100);
-        vm.prank(stranger); // holds no tokens and has approved nothing
-        uint256 shadowId = hook.openShadow(idA, -300, 300, uint128(liquidity));
+    function test_open_takesNoTokensFromTheCurator_andPlacesDust() public {
+        // The stranger holds none of the pool's tokens and has approved nothing. Only the bond is posted.
+        uint256 shadowId = _openAs(stranger, -300, 300, _activeShare(100));
 
         assertEq(_dustLiquidity(shadowId, -300, 300), hook.DUST());
         assertEq(c0.balanceOf(stranger), 0);
@@ -219,37 +242,47 @@ contract ProvingGroundHookTest is TwinPools {
 
     function test_open_unknownPoolReverts() public {
         vm.expectRevert(IProvingGround.PoolNotRegistered.selector);
-        hook.openShadow(idB, -300, 300, 1e18);
+        hook.openShadow{value: BOND}(idB, -300, 300, 1e18);
     }
 
     function test_open_zeroLiquidityReverts() public {
         vm.expectRevert(IProvingGround.ZeroLiquidity.selector);
-        hook.openShadow(idA, -300, 300, 0);
+        hook.openShadow{value: BOND}(idA, -300, 300, 0);
     }
 
     function test_open_rangeMustContainTheCurrentTick() public {
         vm.expectRevert(IProvingGround.RangeMustContainTick.selector);
-        hook.openShadow(idA, 60, 300, 1e18);
+        hook.openShadow{value: BOND}(idA, 60, 300, 1e18);
         vm.expectRevert(IProvingGround.RangeMustContainTick.selector);
-        hook.openShadow(idA, -300, 0, 1e18); // the upper tick is exclusive
-        hook.openShadow(idA, 0, 60, 1e18); // the lower tick is inclusive
+        hook.openShadow{value: BOND}(idA, -300, 0, 1e18); // the upper tick is exclusive
+        hook.openShadow{value: BOND}(idA, 0, 120, 1e18); // the lower tick is inclusive
+    }
+
+    function test_open_rangeMustSatisfyTheMandate() public {
+        vm.expectRevert(IProvingGround.RangeTooNarrow.selector);
+        hook.openShadow{value: BOND}(idA, 0, 60, 1e18);
+        vm.expectRevert(IProvingGround.RangeTooWide.selector);
+        hook.openShadow{value: BOND}(idA, -6000, 6060, 1e18);
+        vm.expectRevert(IProvingGround.RangeNotOnSpacing.selector);
+        hook.openShadow{value: BOND}(idA, -301, 300, 1e18);
+        hook.openShadow{value: BOND}(idA, -6000, 6000, 1e18); // exactly the widest allowed
     }
 
     function test_open_sizeCap() public {
         uint128 atCap = _activeShare(100);
         vm.expectRevert(IProvingGround.ShadowTooLarge.selector);
-        hook.openShadow(idA, -300, 300, atCap + 1e18);
-        hook.openShadow(idA, -300, 300, atCap);
+        hook.openShadow{value: BOND}(idA, -300, 300, atCap + 1e18);
+        hook.openShadow{value: BOND}(idA, -300, 300, atCap);
     }
 
     function test_open_revertsWhenTheDustReserveIsEmpty() public {
-        ProvingGroundHook bare = _deployHook(0x5555, 100);
+        ProvingGroundHook bare = _deployHook(0x5555, _config(100));
         PoolKey memory key = PoolKey(c0, c1, 500, 10, IHooks(address(bare)));
         poolManager.initialize(key, TickMath.getSqrtPriceAtTick(0));
         _mint(key, -600, 600, 1000e18);
 
         vm.expectRevert(abi.encodeWithSelector(IProvingGround.DustReserveLow.selector, c0));
-        bare.openShadow(key.toId(), -300, 300, 1e18);
+        bare.openShadow{value: BOND}(key.toId(), -300, 300, 1e18);
     }
 
     function test_fundDust_pullsTokensAndCredits() public {
@@ -260,9 +293,8 @@ contract ProvingGroundHookTest is TwinPools {
     }
 
     function test_twoShadowsOnTheSameRange_areIndependent() public {
-        uint256 a = hook.openShadow(idA, -300, 300, 1e18);
-        vm.prank(stranger);
-        uint256 b = hook.openShadow(idA, -300, 300, 2e18);
+        uint256 a = _openAs(curator, -300, 300, 1e18);
+        uint256 b = _openAs(stranger, -300, 300, 2e18);
         assertEq(_dustLiquidity(a, -300, 300), hook.DUST());
         assertEq(_dustLiquidity(b, -300, 300), hook.DUST());
 
@@ -274,25 +306,109 @@ contract ProvingGroundHookTest is TwinPools {
         assertApproxEqAbs(b1, 2 * a1, 2);
     }
 
-    // ------------------------------------------------------------------ rebalancing a shadow
+    // ------------------------------------------------------------------ bond and the one-shadow rule
 
-    function test_rebalance_onlyCurator() public {
-        uint256 shadowId = _open();
-        vm.prank(stranger);
-        vm.expectRevert(IProvingGround.NotCurator.selector);
-        hook.rebalanceShadow(shadowId, -600, 600);
+    function test_bond_belowTheMinimumReverts() public {
+        vm.expectRevert(IProvingGround.BondTooSmall.selector);
+        hook.openShadow{value: BOND - 1}(idA, -300, 300, 1e18);
     }
 
-    function test_rebalance_unknownShadowReverts() public {
+    function test_bond_isHeldByTheHook_andALargerOneIsRecorded() public {
+        vm.deal(curator, 1 ether);
+        vm.prank(curator);
+        uint256 shadowId = hook.openShadow{value: 3 * BOND}(idA, -300, 300, 1e18);
+        assertEq(hook.getShadow(shadowId).bond, 3 * BOND);
+        assertEq(address(hook).balance, 3 * BOND);
+    }
+
+    function test_oneShadowPerCuratorPerPool() public {
+        uint256 first = _open();
+        vm.deal(curator, BOND);
+        vm.prank(curator);
+        vm.expectRevert(IProvingGround.ShadowAlreadyOpen.selector);
+        hook.openShadow{value: BOND}(idA, -600, 600, 1e18);
+
+        // Someone else can open on the same pool.
+        _openAs(stranger, -600, 600, 1e18);
+
+        // Closing frees the slot, and the closed shadow stays on the curator's record.
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+        _close(first);
+        assertEq(hook.activeShadowOf(curator, idA), 0);
+        uint256 second = _openAs(curator, -600, 600, 1e18);
+        assertEq(hook.activeShadowOf(curator, idA), second);
+
+        (uint32 opened, uint32 closedWithoutGraduating) = hook.curatorRecord(curator);
+        assertEq(opened, 2);
+        assertEq(closedWithoutGraduating, 1);
+    }
+
+    function test_oneShadowRule_isPerPool() public {
+        PoolKey memory other = PoolKey(c0, c1, 500, 10, IHooks(address(hook)));
+        poolManager.initialize(other, TickMath.getSqrtPriceAtTick(0));
+        _mint(other, -600, 600, 1000e18);
+
+        _open();
+        vm.deal(curator, BOND);
+        vm.prank(curator);
+        uint256 onOther = hook.openShadow{value: BOND}(other.toId(), -300, 300, 1e18);
+        assertEq(hook.activeShadowOf(curator, other.toId()), onOther);
+    }
+
+    function test_bond_closedEarly_staysLockedUntilTheShadowIsOldEnough() public {
+        uint256 shadowId = _open();
+        uint256 unlocksAt = vm.getBlockTimestamp() + MIN_AGE;
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+        _close(shadowId);
+        assertEq(curator.balance, 0, "nothing returned yet");
+        assertEq(hook.getShadow(shadowId).bond, BOND);
+
+        vm.expectRevert(abi.encodeWithSelector(IProvingGround.BondLocked.selector, unlocksAt));
+        hook.withdrawBond(shadowId);
+
+        vm.warp(unlocksAt);
+        vm.expectEmit(true, true, false, true, address(hook));
+        emit IProvingGround.BondReturned(shadowId, curator, BOND);
+        vm.prank(stranger); // anyone may trigger it; the bond only ever goes to the curator
+        hook.withdrawBond(shadowId);
+        assertEq(curator.balance, BOND);
+        assertEq(stranger.balance, 0);
+        assertEq(address(hook).balance, 0);
+
+        vm.expectRevert(IProvingGround.NoBond.selector);
+        hook.withdrawBond(shadowId);
+    }
+
+    function test_bond_closedAfterTheLock_isReturnedByClose() public {
+        uint256 shadowId = _open();
+        vm.warp(vm.getBlockTimestamp() + MIN_AGE);
+        _close(shadowId);
+        assertEq(curator.balance, BOND);
+        assertEq(hook.getShadow(shadowId).bond, 0);
+    }
+
+    function test_bond_cannotBeWithdrawnWhileTheShadowIsOpen() public {
+        uint256 shadowId = _open();
+        uint256 unlocksAt = vm.getBlockTimestamp() + MIN_AGE;
+        vm.warp(unlocksAt + 1 days);
+        vm.expectRevert(abi.encodeWithSelector(IProvingGround.BondLocked.selector, unlocksAt));
+        hook.withdrawBond(shadowId);
+    }
+
+    function test_bond_unknownShadowReverts() public {
         vm.expectRevert(IProvingGround.UnknownShadow.selector);
-        hook.rebalanceShadow(99, -600, 600);
+        hook.withdrawBond(7);
     }
 
-    function test_rebalance_newRangeMustContainTheCurrentTick() public {
-        uint256 shadowId = _open();
-        vm.expectRevert(IProvingGround.RangeMustContainTick.selector);
-        hook.rebalanceShadow(shadowId, 300, 900);
+    function test_bond_aCuratorThatRefusesPayment_cannotTakeItBack() public {
+        RefusesPayment refuser = new RefusesPayment();
+        uint256 shadowId = refuser.open{value: BOND}(hook, idA);
+        vm.warp(vm.getBlockTimestamp() + MIN_AGE);
+        vm.expectRevert(IProvingGround.BondTransferFailed.selector);
+        refuser.close(hook, shadowId);
     }
+
+    // ------------------------------------------------------------------ rebalancing a shadow
 
     function test_rebalance_movesDust_chargesCost_andFoldsFeesIn() public {
         uint256 shadowId = _open();
@@ -300,13 +416,15 @@ contract ProvingGroundHookTest is TwinPools {
         for (uint256 i; i < 4; ++i) {
             _swapBoth(false, 15e18);
         }
+        // The price has moved a long way. Let the time-weighted average catch up with it.
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
 
         IProvingGround.Score memory before_ = hook.scoreAtSpot(shadowId);
         assertGt(before_.feesConservative, 0);
 
         (, int24 tick,,) = poolManager.getSlot0(idA);
         int24 mid = (tick / TS) * TS;
-        hook.rebalanceShadow(shadowId, mid - 300, mid + 300);
+        _rebalance(shadowId, mid - 300, mid + 300);
 
         assertEq(_dustLiquidity(shadowId, -300, 300), 0, "dust left the old range");
         assertEq(_dustLiquidity(shadowId, mid - 300, mid + 300), hook.DUST(), "dust sits on the new range");
@@ -333,18 +451,20 @@ contract ProvingGroundHookTest is TwinPools {
 
     function test_rebalance_intoTheSameMixCostsAlmostNothing() public {
         uint256 shadowId = _open();
-        hook.rebalanceShadow(shadowId, -300, 300);
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+        _rebalance(shadowId, -300, 300);
         IProvingGround.Score memory sc = hook.scoreAtSpot(shadowId);
         assertLe(sc.rebalanceCost, 1e6, "no swap needed, so no cost beyond rounding");
     }
 
     function test_rebalance_aboveTheSizeCap_keepsTheRestIdle() public {
         uint256 shadowId = _open(); // exactly at the cap on a 600-tick range
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
         IProvingGround.Score memory before_ = hook.scoreAtSpot(shadowId);
         uint256 cap = uint256(poolManager.getLiquidity(idA)) * 100 / 10_000;
 
         // The same value on a much narrower range would be far more liquidity than the cap allows.
-        hook.rebalanceShadow(shadowId, -60, 60);
+        _rebalance(shadowId, -60, 60);
 
         IProvingGround.Shadow memory s = hook.getShadow(shadowId);
         assertEq(s.liquidity, cap, "position sits at the cap");
@@ -356,7 +476,8 @@ contract ProvingGroundHookTest is TwinPools {
         assertGt(s.idle, after_.navConservative / 2);
 
         // Going back to the wide range puts the idle value to work again.
-        hook.rebalanceShadow(shadowId, -300, 300);
+        vm.warp(vm.getBlockTimestamp() + COOLDOWN);
+        _rebalance(shadowId, -300, 300);
         s = hook.getShadow(shadowId);
         assertLe(s.idle, 1e6, "nothing idle beyond rounding");
         assertEq(s.rebalances, 2);
@@ -373,6 +494,7 @@ contract ProvingGroundHookTest is TwinPools {
 
     function test_close_needsTheOracle() public {
         uint256 shadowId = _open();
+        vm.prank(curator);
         vm.expectRevert(Oracle.OracleNotReady.selector);
         hook.closeShadow(shadowId);
     }
@@ -384,7 +506,7 @@ contract ProvingGroundHookTest is TwinPools {
         _pingPong(0, 200); // 200 blocks: longer than the oracle window
 
         IProvingGround.Score memory live = hook.score(shadowId);
-        hook.closeShadow(shadowId);
+        _close(shadowId);
 
         assertEq(_dustLiquidity(shadowId, -300, 300), 0);
         _assertReserveMatchesBalance();
@@ -408,12 +530,15 @@ contract ProvingGroundHookTest is TwinPools {
     function test_closed_shadowRejectsFurtherUse() public {
         uint256 shadowId = _open();
         vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
-        hook.closeShadow(shadowId);
+        IProvingGround.RebalanceIntent memory intent = _intent(shadowId, -600, 600);
+        bytes memory signature = _sign(curatorKey, intent);
+        _close(shadowId);
 
+        vm.prank(curator);
         vm.expectRevert(IProvingGround.ShadowIsClosed.selector);
         hook.closeShadow(shadowId);
         vm.expectRevert(IProvingGround.ShadowIsClosed.selector);
-        hook.rebalanceShadow(shadowId, -600, 600);
+        hook.rebalance(intent, signature);
         vm.expectRevert(IProvingGround.ShadowIsClosed.selector);
         hook.scoreAtSpot(shadowId);
         vm.expectRevert(IProvingGround.ShadowIsClosed.selector);
@@ -463,7 +588,7 @@ contract ProvingGroundHookTest is TwinPools {
         uint256 plain = _gasOfSwap(keyB, false);
         uint256 none = _gasOfSwap(keyA, false);
         for (uint256 i; i < 5; ++i) {
-            hook.openShadow(idA, -300 - int24(int256(i)) * 60, 300, 1e18);
+            _openAs(vm.addr(100 + i), -300 - int24(int256(i)) * 60, 300, 1e18);
         }
         uint256 five = _gasOfSwap(keyA, false);
         uint256 firstOfBlock = _gasOfSwap(keyA, true);
@@ -485,5 +610,16 @@ contract ProvingGroundHookTest is TwinPools {
         console2.log("swap gas, hook, first swap of a block, oracle ring full:", firstOfBlockRingFull);
 
         assertEq(five, none, "open shadows add nothing to a swap");
+    }
+}
+
+/// @notice A curator contract that cannot receive native currency.
+contract RefusesPayment {
+    function open(ProvingGroundHook hook, PoolId poolId) external payable returns (uint256) {
+        return hook.openShadow{value: msg.value}(poolId, -300, 300, 1e18);
+    }
+
+    function close(ProvingGroundHook hook, uint256 shadowId) external {
+        hook.closeShadow(shadowId);
     }
 }

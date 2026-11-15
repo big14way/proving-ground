@@ -39,7 +39,17 @@ abstract contract TwinPools is BaseTest {
     uint16 internal constant ORACLE_CAPACITY = 720;
     uint256 internal constant BLOCK_TIME = 12;
 
+    // The mandate and bond the hook is deployed with unless a test asks for something else.
+    uint24 internal constant MIN_WIDTH = 120;
+    uint24 internal constant MAX_WIDTH = 12_000;
+    uint24 internal constant MAX_DEVIATION = 100;
+    uint32 internal constant COOLDOWN = 300;
+    uint32 internal constant MIN_AGE = 7 days;
+    uint128 internal constant BOND = 0.01 ether;
+
     ProvingGroundHook internal hook;
+    address internal curator;
+    uint256 internal curatorKey;
     Currency internal c0;
     Currency internal c1;
     PoolKey internal keyA;
@@ -52,14 +62,18 @@ abstract contract TwinPools is BaseTest {
     uint256 internal unit0; // token0 amount matching one unit of liquidity at the centre price
     uint256 internal unit1; // token1 amount matching one unit of liquidity at the centre price
 
-    /// @param maxShareBps Shadow size cap the hook is deployed with.
-    function _setUpTwin(uint8 decimals0, uint8 decimals1, int24 centerTick, uint128 liquidityScale, uint16 maxShareBps)
-        internal
-    {
+    function _setUpTwin(
+        uint8 decimals0,
+        uint8 decimals1,
+        int24 centerTick,
+        uint128 liquidityScale,
+        IProvingGround.Config memory config
+    ) internal {
         deployArtifactsAndLabel();
         (c0, c1) = _deployPair(decimals0, decimals1);
+        (curator, curatorKey) = makeAddrAndKey("curator");
 
-        hook = _deployHook(0x4444, maxShareBps);
+        hook = _deployHook(0x4444, config);
         MockERC20(Currency.unwrap(c0)).approve(address(hook), type(uint256).max);
         MockERC20(Currency.unwrap(c1)).approve(address(hook), type(uint256).max);
 
@@ -83,16 +97,82 @@ abstract contract TwinPools is BaseTest {
         _baseLiquidity(keyB);
     }
 
-    function _deployHook(uint160 prefix, uint16 maxShareBps) internal returns (ProvingGroundHook h) {
-        address at = address(uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG) ^ (prefix << 144));
-        IProvingGround.Config memory config = IProvingGround.Config({
+    /// @dev The configuration a deployment would use: every mandate limit and the bond are on.
+    /// @param maxShareBps Shadow size cap.
+    function _config(uint16 maxShareBps) internal pure returns (IProvingGround.Config memory) {
+        return IProvingGround.Config({
             twapWindow: TWAP_WINDOW,
             oracleCapacity: ORACLE_CAPACITY,
             shadowMaxPoolShareBps: maxShareBps,
-            defaultDynamicFee: FEE
+            defaultDynamicFee: FEE,
+            minWidthTicks: MIN_WIDTH,
+            maxWidthTicks: MAX_WIDTH,
+            maxDeviationTicks: MAX_DEVIATION,
+            minRebalanceInterval: COOLDOWN,
+            minShadowAge: MIN_AGE,
+            bondMin: BOND
         });
+    }
+
+    /// @dev No cooldown, no price check, no bond, any width. For tests that measure how accurate the
+    /// score is and need to place a shadow wherever the measurement requires.
+    function _looseConfig(uint16 maxShareBps) internal pure returns (IProvingGround.Config memory config) {
+        config = _config(maxShareBps);
+        config.minWidthTicks = 1;
+        config.maxWidthTicks = type(uint24).max;
+        config.maxDeviationTicks = type(uint24).max;
+        config.minRebalanceInterval = 0;
+        config.minShadowAge = 0;
+        config.bondMin = 0;
+    }
+
+    function _deployHook(uint160 prefix, IProvingGround.Config memory config) internal returns (ProvingGroundHook h) {
+        address at = address(uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG) ^ (prefix << 144));
         deployCodeTo("ProvingGroundHook.sol:ProvingGroundHook", abi.encode(poolManager, config), at);
         h = ProvingGroundHook(at);
+    }
+
+    // ------------------------------------------------------------------ shadows and signed intents
+
+    /// @dev Opens a shadow on pool A as `who`, posting the hook's minimum bond.
+    function _openAs(address who, int24 lo, int24 hi, uint128 liquidity) internal returns (uint256 shadowId) {
+        uint256 bond = hook.BOND_MIN();
+        vm.deal(who, who.balance + bond);
+        vm.prank(who);
+        shadowId = hook.openShadow{value: bond}(idA, lo, hi, liquidity);
+    }
+
+    /// @dev The intent the shadow's curator would sign next: their current nonce, valid for an hour.
+    function _intent(uint256 shadowId, int24 lo, int24 hi)
+        internal
+        view
+        returns (IProvingGround.RebalanceIntent memory)
+    {
+        IProvingGround.Shadow memory s = hook.getShadow(shadowId);
+        return IProvingGround.RebalanceIntent({
+            poolId: s.poolId,
+            subjectId: shadowId,
+            live: false,
+            tickLower: lo,
+            tickUpper: hi,
+            nonce: hook.nonces(s.curator),
+            deadline: vm.getBlockTimestamp() + 1 hours
+        });
+    }
+
+    function _sign(uint256 privateKey, IProvingGround.RebalanceIntent memory intent)
+        internal
+        view
+        returns (bytes memory)
+    {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, hook.intentDigest(intent));
+        return abi.encodePacked(r, s, v);
+    }
+
+    /// @dev The curator signs, this contract submits. The submitter is never the curator in these tests.
+    function _rebalance(uint256 shadowId, int24 lo, int24 hi) internal {
+        IProvingGround.RebalanceIntent memory intent = _intent(shadowId, lo, hi);
+        hook.rebalance(intent, _sign(curatorKey, intent));
     }
 
     /// @dev Deploys two tokens so that currency0 has `decimals0` and currency1 has `decimals1`.

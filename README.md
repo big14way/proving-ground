@@ -13,18 +13,17 @@ Built for the Uniswap Hook Incubator UHI11 Hookathon, themed track: Active Manag
 | In-pool price oracle (time-weighted tick, written once per block) | Built, tested |
 | Shadow positions: open, rebalance, close | Built, tested |
 | Shadow score: fees, value, passive-LP benchmark, alpha | Built, tested against real positions |
-| Signed rebalance instructions with hard limits | Not built yet |
+| Signed rebalance instructions, checked against a fixed mandate | Built, tested |
+| Bond and one open shadow per address per pool | Built, tested |
 | Capacity gating, live vaults, performance fees | Not built yet |
-
-Until signed instructions land, only the curator's own address can rebalance or close their shadow, and anyone can open one.
 
 ## How the shadow score works
 
-1. A curator opens a shadow: a tick range and an amount of *virtual* liquidity. No capital is taken from them. A shadow may be at most 1% of the pool's active liquidity, the size at which the score is validated below.
+1. A curator opens a shadow: a tick range and an amount of *virtual* liquidity. The position needs no capital; the curator only posts a small bond (see [The mandate](#the-mandate)). A shadow may be at most 1% of the pool's active liquidity, the size at which the score is validated below.
 2. The hook places a dust-sized real position (1000 liquidity units, paid from a small reserve the hook holds) on the same ticks. In Uniswap v4 a tick only tracks fee growth while some liquidity references it, so this makes the pool itself account for fees inside the shadow's range.
 3. Fees the shadow would have earned are `virtual liquidity × fee growth inside the range`, read from the pool with `StateLibrary.getFeeGrowthInside`. This is the **raw** figure.
 4. Real capital would have joined the pool's active liquidity and diluted that fee growth. The **conservative** figure scales the raw one by `L / (L + virtual liquidity)`, where `L` is the pool's active liquidity when the position was placed.
-5. A rebalance moves the virtual position to a new range and charges a modelled cost: the pool fee on the amount that would have to be swapped, plus the price impact of that swap against the pool's active liquidity. Fees earned so far are folded into the position, as a real vault would do. If the new range would exceed the size cap, the excess is held as idle value that earns nothing.
+5. A rebalance, asked for by a signed instruction, moves the virtual position to a new range and charges a modelled cost: the pool fee on the amount that would have to be swapped, plus the price impact of that swap against the pool's active liquidity. Fees earned so far are folded into the position, as a real vault would do. If the new range would exceed the size cap, the excess is held as idle value that earns nothing.
 6. The score compares the shadow against two references fixed when it opened: a **passive full-range position** of the same starting value earning the pool's fees, and **simply holding** the starting tokens. Alpha is the shadow's conservative value over the passive position's value, in basis points. The passive position's fees are not scaled down, which leans the comparison against the curator.
 
 Nothing in steps 3 to 6 runs during a swap. Fee growth only changes when the pool trades, so the score is computed when someone asks for it.
@@ -32,6 +31,36 @@ Nothing in steps 3 to 6 runs during a swap. Fee growth only changes when the poo
 ### Price oracle
 
 Uniswap v4 pools have no built-in price oracle. The hook records one observation per block in `beforeSwap`, taken before the first swap so it captures the tick that held since the previous observation. `score` values everything at the average tick over the oracle window, so a price pushed within a single transaction does not move it. `scoreAtSpot` values at the current pool price and exists for display and for the accuracy tests.
+
+## The mandate
+
+A curator never calls the hook to move a position. They sign an instruction (EIP-712 typed data) and anyone may submit it:
+
+```
+RebalanceIntent(bytes32 poolId,uint256 subjectId,bool live,int24 tickLower,int24 tickUpper,uint256 nonce,uint256 deadline)
+```
+
+The hook executes it only if every check passes. The limits are fixed when the hook is deployed; there is no owner and nothing can change them afterwards.
+
+| Check | Rule | Value used in the tests |
+|---|---|---|
+| Signature | Signed by the position's curator. Contract wallets are supported through ERC-1271 | |
+| Nonce and deadline | The curator's next nonce, and not past the deadline. `skipNonce` cancels outstanding instructions | |
+| Range | On the pool's tick grid, contains the current tick, and neither narrower nor wider than the limits | 120 to 12,000 ticks |
+| Cooldown | A minimum time since the position was opened or last moved | 300 seconds |
+| Price sanity | The pool price is within a set distance of the hook's time-weighted average price | 100 ticks, 30-minute average |
+
+An instruction that fails a check is not used up, so it can be submitted again before its deadline.
+
+### What the price check is worth
+
+A shadow is rebalanced at the pool's current price, and that price can be pushed for the length of one transaction. `test_withoutThePriceCheck_aFlashedPriceInflatesTheScore` runs the attack against a hook deployed with the price check switched off: push the price 288 ticks up, rebalance the shadow so that it books a sale of its token0 at the pushed price, push the price back. The shadow's score rises by 110 bps that no real position could have earned. Against the normal configuration the same rebalance reverts with `PriceDeviationTooHigh`, and it goes through once the price is back or once the average has caught up with a move that lasted.
+
+### Bond and the one-shadow rule
+
+Opening a shadow costs a bond in the chain's native currency (0.01 in the tests). It is returned once the shadow has been closed and a lock period has passed since it was opened (7 days in the tests), whichever comes later. An address can have one open shadow per pool. Every shadow an address opened, and every one it closed, stays on its public record (`curatorRecord`).
+
+These rules make it costly, not impossible, to open many shadows and show off only the lucky one: each attempt needs its own address and its own locked bond.
 
 ## How it is tested
 
@@ -84,12 +113,12 @@ Measured with each swap as its own transaction (`isolate` mode), on a pool with 
 | Swap | Gas |
 |---|---|
 | Pool without the hook | 103,910 |
-| Hook, no shadows open | 111,018 |
-| Hook, five shadows open | 111,018 |
-| Hook, first swap of a block (new oracle slot) | 141,434 |
-| Hook, first swap of a block (oracle ring full) | 124,085 |
+| Hook, no shadows open | 111,172 |
+| Hook, five shadows open | 111,172 |
+| Hook, first swap of a block (new oracle slot) | 141,588 |
+| Hook, first swap of a block (oracle ring full) | 124,239 |
 
-Open shadows add nothing to a swap; the test asserts the two figures are equal. The hook's cost is the oracle: about 7,100 gas on every swap, and about 13,000 to 30,000 more on the first swap of each block. An earlier prototype scored every open shadow inside every swap, which cost roughly 50,000 gas per shadow per swap. That design was dropped.
+Open shadows add nothing to a swap; the test asserts the two figures are equal. The hook's cost is the oracle: about 7,300 gas on every swap, and about 13,000 to 30,000 more on the first swap of each block. An earlier prototype scored every open shadow inside every swap, which cost roughly 50,000 gas per shadow per swap. That design was dropped.
 
 ### Limits of these tests and of the design so far
 
@@ -99,7 +128,10 @@ Open shadows add nothing to a swap; the test asserts the two figures are equal. 
 - The raw value does not compound the extra fees of finished legs.
 - A shadow's range boundaries are initialized ticks, like any liquidity position's. A swap that crosses one pays for that tick crossing.
 - Pools with a native-currency side are rejected at initialization.
-- Nothing yet limits how many shadows one person can open from different addresses.
+- One person can still open shadows from many addresses. Each costs a locked bond, which raises the price of doing so without ruling it out.
+- Whoever submits a signed instruction picks the moment, anywhere before its deadline. A curator limits that with a short deadline.
+- A shadow can step out of the market by rebalancing into a range too narrow to hold its value under the size cap; the remainder waits as idle token1. It pays the modelled cost of that sale, and it can only do so at a price that passes the price check.
+- A curator contract that cannot receive native currency cannot take its bond back.
 
 ## Run it
 
@@ -109,18 +141,20 @@ cd proving-ground
 forge test -vv
 ```
 
-Requires [Foundry](https://book.getfoundry.sh/). Compiles with solc 0.8.30, `via_ir`, EVM version cancun. 102 tests.
+Requires [Foundry](https://book.getfoundry.sh/). Compiles with solc 0.8.30, `via_ir`, EVM version cancun. 145 tests.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `src/ProvingGroundHook.sol` | The hook: pool registration, oracle writes, shadow lifecycle, scoring views, dust positions |
+| `src/ProvingGroundHook.sol` | The hook: pool registration, oracle writes, shadow lifecycle, signed instructions, bonds, scoring views, dust positions |
 | `src/libraries/Oracle.sol` | Observation ring buffer and time-weighted tick |
 | `src/libraries/ScoreMath.sol` | Position amounts and values, fee and haircut maths, rebalance plan and cost, alpha |
+| `src/libraries/Mandate.sol` | The instruction's EIP-712 hash and the range, cooldown and price checks |
 | `src/interfaces/IProvingGround.sol` | Structs, events, errors |
 | `test/ShadowAccuracy.t.sol` | Twin-pool accuracy suite, run on three token pairs |
-| `test/ProvingGroundHook.t.sol` | Hook behaviour, guards, dust accounting, gas |
+| `test/ProvingGroundHook.t.sol` | Hook behaviour, guards, bonds, the one-shadow rule, dust accounting, gas |
+| `test/Mandate.t.sol` | Signed instructions and every mandate check at its limit, the price-check attack, fuzz tests |
 | `test/Oracle.t.sol`, `test/ScoreMath.t.sol` | Unit and fuzz tests for the libraries |
 | `test/utils/TwinPools.sol` | The twin-pool test base |
 | `test/utils/` (other files) | Test scaffolding (see Credits) |
@@ -133,6 +167,7 @@ No partner integrations.
 
 - `test/utils/BaseTest.sol`, `test/utils/Deployers.sol` and `test/utils/libraries/EasyPosm.sol` are test scaffolding from the [Uniswap v4 template](https://github.com/uniswapfoundation/v4-template).
 - Hook base contract from [OpenZeppelin uniswap-hooks](https://github.com/OpenZeppelin/uniswap-hooks).
+- EIP-712 domain handling, signature checking (ECDSA and ERC-1271) and safe token transfers from [OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts).
 - Precompiled v4 deployers for tests from [hookmate](https://github.com/akshatmittal/hookmate).
 - The oracle's design (one observation per block holding a running tick sum, kept in a ring buffer) follows Uniswap v3's oracle. The code here is written for this project.
 - Tests check the hook's amount maths against `LiquidityAmounts` from the v4-core test utilities.

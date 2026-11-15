@@ -13,6 +13,26 @@ interface IProvingGround {
         uint16 oracleCapacity; // observations kept per pool; should be >= twapWindow / block time
         uint16 shadowMaxPoolShareBps; // largest shadow, as a share of the pool's active liquidity
         uint24 defaultDynamicFee; // fee set on dynamic-fee pools at initialization, in pips
+        // The mandate: limits every range placement must respect.
+        uint24 minWidthTicks; // narrowest range allowed
+        uint24 maxWidthTicks; // widest range allowed
+        uint24 maxDeviationTicks; // largest gap between the pool price and its time-weighted average at a rebalance
+        uint32 minRebalanceInterval; // seconds between rebalances of one position
+        // The cost of opening a shadow.
+        uint32 minShadowAge; // seconds a shadow's bond stays locked, counted from when it was opened
+        uint128 bondMin; // smallest bond, in the chain's native currency
+    }
+
+    /// @notice A curator's signed instruction to move a position to a new range.
+    /// @dev EIP-712 typed data. Anyone may submit it; the hook checks it against the mandate.
+    struct RebalanceIntent {
+        PoolId poolId;
+        uint256 subjectId; // the shadow id (or, when `live`, the vault id)
+        bool live;
+        int24 tickLower;
+        int24 tickUpper;
+        uint256 nonce; // must be the curator's next nonce
+        uint256 deadline; // last timestamp at which the intent may be executed
     }
 
     /// @notice A capital-free position scored against live swap flow.
@@ -40,6 +60,7 @@ interface IProvingGround {
         uint48 closedAt;
         uint48 lastRebalanceAt;
         uint32 rebalances;
+        uint128 bond; // native currency held for the curator until the shadow is closed and aged
     }
 
     /// @notice A shadow's result at one valuation price. All amounts are in token1.
@@ -57,6 +78,12 @@ interface IProvingGround {
         uint256 rebalanceCost; // cumulative
     }
 
+    /// @notice What a curator address has done so far. Abandoned shadows stay on the record.
+    struct CuratorRecord {
+        uint32 shadowsOpened;
+        uint32 shadowsClosedWithoutGraduating;
+    }
+
     event PoolRegistered(PoolId indexed poolId, int24 tickSpacing, uint24 fee);
     event DustFunded(Currency indexed currency, address indexed from, uint256 amount);
     event ShadowOpened(
@@ -70,17 +97,41 @@ interface IProvingGround {
     );
     event ShadowRebalanced(uint256 indexed shadowId, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 cost);
     event ShadowClosed(uint256 indexed shadowId, int256 alphaBps, int256 alphaVsHoldBps, uint256 navConservative);
+    event IntentUsed(address indexed curator, uint256 nonce, address indexed submitter);
+    event NonceSkipped(address indexed curator, uint256 nonce);
+    event BondReturned(uint256 indexed shadowId, address indexed curator, uint256 amount);
 
     error InvalidConfig();
     error NativeCurrencyNotSupported();
     error PoolNotRegistered();
     error ZeroLiquidity();
     error NoActiveLiquidity();
-    error RangeMustContainTick();
     error ShadowTooLarge();
     error NothingToRebalance();
     error UnknownShadow();
     error ShadowIsClosed();
     error NotCurator();
     error DustReserveLow(Currency currency);
+
+    // Opening rules.
+    error BondTooSmall();
+    error ShadowAlreadyOpen();
+    error BondLocked(uint256 unlocksAt);
+    error NoBond();
+    error BondTransferFailed();
+
+    // Intent checks.
+    error LiveNotSupported();
+    error WrongPool();
+    error IntentExpired();
+    error BadNonce();
+    error BadSignature();
+
+    // Mandate checks.
+    error RangeNotOnSpacing();
+    error RangeTooNarrow();
+    error RangeTooWide();
+    error RangeMustContainTick();
+    error CooldownNotElapsed(uint256 readyAt);
+    error PriceDeviationTooHigh(int24 spotTick, int24 twapTick);
 }
