@@ -241,7 +241,23 @@ cd proving-ground
 forge test -vv
 ```
 
-Requires [Foundry](https://book.getfoundry.sh/). Compiles with solc 0.8.30, `via_ir`, EVM version cancun. 212 tests, including three invariant properties.
+Requires [Foundry](https://book.getfoundry.sh/). Compiles with solc 0.8.30, `via_ir`, EVM version cancun. 215 tests, including three invariant properties.
+
+### The whole story in one run
+
+```bash
+forge test --match-test test_walkthrough -vv
+```
+
+prints a curator's life from start to finish with the figures at each step: the shadow is opened and scored, moved by a signed instruction, refused when an instruction breaks the mandate, graduated into a live vault, joined by a depositor, rebalanced for real, charged a fee, and exited.
+
+### Deploy
+
+```bash
+forge script script/Deploy.s.sol --rpc-url <url> --private-key <key> --broadcast
+```
+
+The hook and the vault name each other at construction. The script works out the address the vault will get, mines a CREATE2 salt that gives the hook its permission bits with that address in its constructor arguments, then deploys the hook and the vault. The pool manager is taken from `POOL_MANAGER`, or from the known address for the chain; on a local node a fresh one is deployed. Settings such as `MIN_SHADOW_AGE` and `TWAP_WINDOW` can be overridden with environment variables (see the script). `test/Deploy.t.sol` covers the same path, and the script has been run against a local node.
 
 ## Layout
 
@@ -257,6 +273,8 @@ Requires [Foundry](https://book.getfoundry.sh/). Compiles with solc 0.8.30, `via
 | `test/ProvingGroundHook.t.sol` | Hook behaviour, guards, bonds, the one-shadow rule, dust accounting, gas |
 | `test/Mandate.t.sol` | Signed instructions and every mandate check at its limit, the price-check attack, fuzz tests |
 | `test/Vault.t.sol` | Going live, the deposit and withdrawal round trip, capacity, demotion, stake, live rebalancing, the loss limit, the performance fee, gas |
+| `test/Walkthrough.t.sol` | The end-to-end story, printed step by step |
+| `script/Deploy.s.sol`, `test/Deploy.t.sol` | Deployment of the hook and vault as a bound pair, and its test |
 | `test/Invariants.t.sol` | Invariant properties of the vault and the hook under random sequences of actions |
 | `snapshots/` | Gas figures written by the tests |
 | `test/Oracle.t.sol`, `test/ScoreMath.t.sol` | Unit and fuzz tests for the libraries |
@@ -273,7 +291,7 @@ No partner integrations.
 - Hook base contract from [OpenZeppelin uniswap-hooks](https://github.com/OpenZeppelin/uniswap-hooks).
 - EIP-712 domain handling, signature checking (ECDSA and ERC-1271), safe token transfers and the reentrancy guard from [OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts).
 - Vault shares use the `ERC6909` contract from [Uniswap v4-core](https://github.com/Uniswap/v4-core) (itself adapted from Solmate), and `LiquidityAmounts` from [v4-periphery](https://github.com/Uniswap/v4-periphery).
-- Precompiled v4 deployers for tests from [hookmate](https://github.com/akshatmittal/hookmate).
+- Precompiled v4 deployers for tests, and the per-chain v4 addresses used by the deploy script, from [hookmate](https://github.com/akshatmittal/hookmate). The deploy script mines the hook address with `HookMiner` from v4-periphery.
 - The oracle's design (one observation per block holding a running tick sum, kept in a ring buffer) follows Uniswap v3's oracle. The code here is written for this project.
 - Tests check the hook's amount maths against `LiquidityAmounts` from the v4-core test utilities.
 
