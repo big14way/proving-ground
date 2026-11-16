@@ -19,7 +19,9 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
 
 import {ProvingGroundHook} from "../../src/ProvingGroundHook.sol";
+import {ProvingGroundVault} from "../../src/ProvingGroundVault.sol";
 import {IProvingGround} from "../../src/interfaces/IProvingGround.sol";
+import {IProvingGroundVault} from "../../src/interfaces/IProvingGroundVault.sol";
 
 /// @notice Two pools that receive exactly the same swaps.
 /// Pool A carries the hook, so positions on it can be shadows (no capital).
@@ -48,6 +50,10 @@ abstract contract TwinPools is BaseTest {
     uint128 internal constant BOND = 0.01 ether;
 
     ProvingGroundHook internal hook;
+    /// @dev Where the vault contract is (or would be) deployed. The hook is told this address at
+    /// construction; tests that need the vault deploy it here.
+    address internal vaultAt = makeAddr("vault");
+    ProvingGroundVault internal vault;
     address internal curator;
     uint256 internal curatorKey;
     Currency internal c0;
@@ -99,7 +105,7 @@ abstract contract TwinPools is BaseTest {
 
     /// @dev The configuration a deployment would use: every mandate limit and the bond are on.
     /// @param maxShareBps Shadow size cap.
-    function _config(uint16 maxShareBps) internal pure returns (IProvingGround.Config memory) {
+    function _config(uint16 maxShareBps) internal view returns (IProvingGround.Config memory) {
         return IProvingGround.Config({
             twapWindow: TWAP_WINDOW,
             oracleCapacity: ORACLE_CAPACITY,
@@ -110,13 +116,14 @@ abstract contract TwinPools is BaseTest {
             maxDeviationTicks: MAX_DEVIATION,
             minRebalanceInterval: COOLDOWN,
             minShadowAge: MIN_AGE,
-            bondMin: BOND
+            bondMin: BOND,
+            vault: vaultAt
         });
     }
 
     /// @dev No cooldown, no price check, no bond, any width. For tests that measure how accurate the
     /// score is and need to place a shadow wherever the measurement requires.
-    function _looseConfig(uint16 maxShareBps) internal pure returns (IProvingGround.Config memory config) {
+    function _looseConfig(uint16 maxShareBps) internal view returns (IProvingGround.Config memory config) {
         config = _config(maxShareBps);
         config.minWidthTicks = 1;
         config.maxWidthTicks = type(uint24).max;
@@ -130,6 +137,61 @@ abstract contract TwinPools is BaseTest {
         address at = address(uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG) ^ (prefix << 144));
         deployCodeTo("ProvingGroundHook.sol:ProvingGroundHook", abi.encode(poolManager, config), at);
         h = ProvingGroundHook(at);
+    }
+
+    // ------------------------------------------------------------------ the vault
+
+    /// @dev The vault configuration a deployment would use.
+    function _vaultConfig() internal pure returns (IProvingGroundVault.VaultConfig memory) {
+        return IProvingGroundVault.VaultConfig({
+            graduationAlphaBps: 0,
+            demotionAlphaBps: -200,
+            baseMultiple: 2,
+            maxMultiple: 10,
+            alphaStepBps: 50,
+            liveMaxPoolShareBps: 1000,
+            maxRebalanceLossBps: 50
+        });
+    }
+
+    /// @dev Deploys the vault at the address the hook was told to trust.
+    function _deployVault(IProvingGroundVault.VaultConfig memory config) internal {
+        deployCodeTo("ProvingGroundVault.sol:ProvingGroundVault", abi.encode(hook, config), vaultAt);
+        vault = ProvingGroundVault(vaultAt);
+    }
+
+    /// @dev Gives `who` plenty of both tokens and lets the vault pull them.
+    function _fund(address who) internal {
+        MockERC20(Currency.unwrap(c0)).transfer(who, 1e27);
+        MockERC20(Currency.unwrap(c1)).transfer(who, 1e27);
+        vm.startPrank(who);
+        MockERC20(Currency.unwrap(c0)).approve(address(vault), type(uint256).max);
+        MockERC20(Currency.unwrap(c1)).approve(address(vault), type(uint256).max);
+        vm.stopPrank();
+    }
+
+    /// @dev The live intent a vault's curator would sign next.
+    function _liveIntent(uint256 vaultId, int24 lo, int24 hi)
+        internal
+        view
+        returns (IProvingGround.RebalanceIntent memory)
+    {
+        IProvingGroundVault.Vault memory v = vault.getVault(vaultId);
+        return IProvingGround.RebalanceIntent({
+            poolId: v.poolId,
+            subjectId: vaultId,
+            live: true,
+            tickLower: lo,
+            tickUpper: hi,
+            nonce: hook.nonces(v.curator),
+            deadline: vm.getBlockTimestamp() + 1 hours
+        });
+    }
+
+    /// @dev The curator signs, this contract submits.
+    function _rebalanceLive(uint256 vaultId, int24 lo, int24 hi) internal {
+        IProvingGround.RebalanceIntent memory intent = _liveIntent(vaultId, lo, hi);
+        vault.rebalance(intent, _sign(curatorKey, intent));
     }
 
     // ------------------------------------------------------------------ shadows and signed intents

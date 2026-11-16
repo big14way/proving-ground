@@ -2,7 +2,7 @@
 
 **Prove it on paper, on-chain. Then earn the capital.**
 
-Proving Ground is a Uniswap v4 hook for curated liquidity. A liquidity curator runs their strategy as a capital-free *shadow* position, and the hook scores what that position would have earned from real swap flow. The score is a public on-chain record, and it decides how much real liquidity the curator may manage.
+Proving Ground is a Uniswap v4 hook for curated liquidity. A liquidity curator runs their strategy as a capital-free *shadow* position, and the hook scores what that position would have earned from real swap flow. The score is a public on-chain record, and it decides how much real liquidity the curator may manage. Once live, the curator moves that liquidity only through signed instructions that the hook checks against fixed limits.
 
 Built for the Uniswap Hook Incubator UHI11 Hookathon, themed track: Active Management and Curated Liquidity.
 
@@ -15,7 +15,10 @@ Built for the Uniswap Hook Incubator UHI11 Hookathon, themed track: Active Manag
 | Shadow score: fees, value, passive-LP benchmark, alpha | Built, tested against real positions |
 | Signed rebalance instructions, checked against a fixed mandate | Built, tested |
 | Bond and one open shadow per address per pool | Built, tested |
-| Capacity gating, live vaults, performance fees | Not built yet |
+| Live vaults: going live, in-kind deposits and withdrawals, shares | Built, tested |
+| Capacity earned by score, pool-share cap, demotion | Built, tested |
+| Live rebalancing through the pool, with a loss limit | Built, tested |
+| Performance fee | Not built yet |
 
 ## How the shadow score works
 
@@ -34,13 +37,13 @@ Uniswap v4 pools have no built-in price oracle. The hook records one observation
 
 ## The mandate
 
-A curator never calls the hook to move a position. They sign an instruction (EIP-712 typed data) and anyone may submit it:
+A curator never calls a contract to move a position, shadow or live. They sign an instruction (EIP-712 typed data) and anyone may submit it:
 
 ```
 RebalanceIntent(bytes32 poolId,uint256 subjectId,bool live,int24 tickLower,int24 tickUpper,uint256 nonce,uint256 deadline)
 ```
 
-The hook executes it only if every check passes. The limits are fixed when the hook is deployed; there is no owner and nothing can change them afterwards.
+It is executed only if every check passes. `live` says whether it moves a shadow (submitted to the hook) or a live vault (submitted to the vault, which hands it to the hook to be checked). Both kinds go through the same checking code in the hook and share one nonce sequence per curator. The limits are fixed at deployment; there is no owner and nothing can change them afterwards.
 
 | Check | Rule | Value used in the tests |
 |---|---|---|
@@ -49,6 +52,7 @@ The hook executes it only if every check passes. The limits are fixed when the h
 | Range | On the pool's tick grid, contains the current tick, and neither narrower nor wider than the limits | 120 to 12,000 ticks |
 | Cooldown | A minimum time since the position was opened or last moved | 300 seconds |
 | Price sanity | The pool price is within a set distance of the hook's time-weighted average price | 100 ticks, 30-minute average |
+| Loss limit (live vaults only) | After the vault's swap, its tokens are worth at least a set fraction of what they were before, at the time-weighted price | 0.5% at most lost |
 
 An instruction that fails a check is not used up, so it can be submitted again before its deadline.
 
@@ -61,6 +65,57 @@ A shadow is rebalanced at the pool's current price, and that price can be pushed
 Opening a shadow costs a bond in the chain's native currency (0.01 in the tests). It is returned once the shadow has been closed and a lock period has passed since it was opened (7 days in the tests), whichever comes later. An address can have one open shadow per pool. Every shadow an address opened, and every one it closed, stays on its public record (`curatorRecord`).
 
 These rules make it costly, not impossible, to open many shadows and show off only the lucky one: each attempt needs its own address and its own locked bond.
+
+## Live vaults
+
+A curator can go live once their shadow has reached the minimum age (7 days in the tests) and scores at or above the graduation line (0 bps in the tests: at least as good as the passive position, after the haircut). `goLive` closes the shadow as graduated, returns its bond, and opens a vault on the shadow's current range. The curator funds it, and that first deposit is the curator's **stake**.
+
+Real liquidity is held by a second contract, `ProvingGroundVault`, because the hook and the vault together do not fit in one contract under the 24,576-byte limit. The two are bound at deployment: the hook is given the vault's address, the vault refuses to deploy anywhere else, and neither has an owner.
+
+### Deposits and withdrawals
+
+Both are in kind and proportional. Nothing is swapped and nothing is priced.
+
+- A depositor asks for a number of shares and adds that fraction to the vault's position and to its idle balances. Fees the position has earned are collected first, so a newcomer pays for their share of them.
+- A withdrawer takes the same fraction out of the position and the idle balances.
+- A withdrawal uses neither the hook, the oracle nor the curator. One test replaces the hook's code with code that always reverts, and the withdrawal still goes through.
+- Rounding goes against whoever is entering or leaving. A deposit followed at once by a withdrawal returns the tokens to within 3 wei, and never more than was paid in (fuzz-tested).
+- Shares are ERC-6909 tokens, one id per vault. The curator's stake is a number on the vault's books and cannot be transferred.
+
+What the vault reports as its holdings matches a real position of the same size in the twin pool to within 2 wei.
+
+### Capacity
+
+Outside money is limited by the curator's own money in the vault:
+
+```
+total shares <= curator's stake x multiple
+multiple = min(maximum, base + score / step)
+```
+
+In the tests the base is 2, each 50 bps of score adds 1, and the maximum is 10. The score is the shadow's final score for the vault's first 7 days. After that it is the vault's own: its value per share against a passive full-range position fixed when the vault opened. In the test run the shadow scores 110 bps, so the vault opens with a multiple of 4.
+
+- **Pool-share cap.** A vault's position may be at most 10% of the pool's active liquidity. Checked when going live, on every deposit, and when a rebalance places liquidity.
+- **Demotion.** A vault whose own score is below −200 bps takes no new deposits. Withdrawals are unaffected.
+- **Stake.** The curator can add stake at any time, and can take out only what is not needed to back the outside deposits at the current multiple. Taking out the last share closes the vault.
+
+### Moving live liquidity
+
+The vault calls the hook's `authorizeLive`, which verifies the signature, nonce and deadline and applies the range, cooldown and price checks. Then, in one pool-manager unlock, the vault:
+
+1. removes all its liquidity, which also collects its fees;
+2. swaps through the same pool toward the token mix the new range needs, with a price limit that keeps the price inside the new range and inside the mandate's price bound;
+3. checks the loss limit: the tokens after the swap must be worth at least 99.5% of the tokens before it, at the time-weighted price;
+4. adds as much liquidity as its balances and the pool-share cap allow. Anything left stays idle and is shared in proportion like everything else.
+
+The swap is sized for the price it is expected to end at, not the price it starts from. Near the edge of a range a move of two ticks changes the mix the range needs by several percent, and sizing at the starting price left about 2% of a small vault idle in testing.
+
+| Test case | Result |
+|---|---|
+| Small vault moved from ±300 ticks to a range 120 below and 480 above | Cost 8 bps of the vault's value; a few hundred million wei left idle out of 0.9e18 |
+| Vault that would need a swap larger than the price bound allows | Its swap stops 99 ticks from the average (bound: 100); the unswapped 23% of the vault stays idle |
+| Narrow range that would exceed the pool-share cap | Position placed at the cap, no swap, the rest idle in both tokens |
+| Signed instruction held back while the price is pushed 88 ticks against the vault (inside the bound) | The swap would lose about 35 bps instead of 9; with a 25 bps loss limit the call reverts |
 
 ## How it is tested
 
@@ -113,12 +168,18 @@ Measured with each swap as its own transaction (`isolate` mode), on a pool with 
 | Swap | Gas |
 |---|---|
 | Pool without the hook | 103,910 |
-| Hook, no shadows open | 111,172 |
-| Hook, five shadows open | 111,172 |
-| Hook, first swap of a block (new oracle slot) | 141,588 |
-| Hook, first swap of a block (oracle ring full) | 124,239 |
+| Hook, no shadows open | 111,216 |
+| Hook, five shadows open | 111,216 |
+| Hook, first swap of a block (new oracle slot) | 141,632 |
+| Hook, first swap of a block (oracle ring full) | 124,283 |
 
 Open shadows add nothing to a swap; the test asserts the two figures are equal. The hook's cost is the oracle: about 7,300 gas on every swap, and about 13,000 to 30,000 more on the first swap of each block. An earlier prototype scored every open shadow inside every swap, which cost roughly 50,000 gas per shadow per swap. That design was dropped.
+
+| Vault operation | Gas |
+|---|---|
+| Deposit | 239,529 (256,629 for an address's first shares) |
+| Withdraw | 167,165 |
+| Rebalance with a swap | 476,606 |
 
 ### Limits of these tests and of the design so far
 
@@ -132,6 +193,14 @@ Open shadows add nothing to a swap; the test asserts the two figures are equal. 
 - Whoever submits a signed instruction picks the moment, anywhere before its deadline. A curator limits that with a short deadline.
 - A shadow can step out of the market by rebalancing into a range too narrow to hold its value under the size cap; the remainder waits as idle token1. It pays the modelled cost of that sale, and it can only do so at a price that passes the price check.
 - A curator contract that cannot receive native currency cannot take its bond back.
+- There is no performance fee yet, so a curator earns only on their own stake.
+- Deposits have no lock-up. Someone can deposit just before fees accrue and withdraw just after, taking a share of them. Capacity and the pool-share cap limit how much.
+- The loss limit bounds what a sandwich can take from one rebalance. It does not make that zero.
+- A vault sitting at the pool-share cap takes no deposits, because a deposit must add to the position. It reopens when the pool grows or the curator moves to a wider range.
+- At the size cap a shadow's unplaced remainder is booked as token1, while a vault's stays in whatever mix is left over. The two differ there.
+- The vault sizes its swap assuming the pool's liquidity stays the same along the swap's path. When it does not, more is left idle; nothing is lost.
+- A curator cannot withdraw the stake that backs outside deposits, so cannot fully exit while depositors remain.
+- Fee-on-transfer and rebasing tokens are not supported.
 
 ## Run it
 
@@ -141,20 +210,22 @@ cd proving-ground
 forge test -vv
 ```
 
-Requires [Foundry](https://book.getfoundry.sh/). Compiles with solc 0.8.30, `via_ir`, EVM version cancun. 145 tests.
+Requires [Foundry](https://book.getfoundry.sh/). Compiles with solc 0.8.30, `via_ir`, EVM version cancun. 200 tests.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `src/ProvingGroundHook.sol` | The hook: pool registration, oracle writes, shadow lifecycle, signed instructions, bonds, scoring views, dust positions |
+| `src/ProvingGroundHook.sol` | The hook: pool registration, oracle writes, shadow lifecycle, signed instructions for shadows and vaults, bonds, scoring views, dust positions |
+| `src/ProvingGroundVault.sol` | Live vaults: going live, in-kind deposits and withdrawals, ERC-6909 shares, capacity, live rebalancing |
 | `src/libraries/Oracle.sol` | Observation ring buffer and time-weighted tick |
 | `src/libraries/ScoreMath.sol` | Position amounts and values, fee and haircut maths, rebalance plan and cost, alpha |
 | `src/libraries/Mandate.sol` | The instruction's EIP-712 hash and the range, cooldown and price checks |
-| `src/interfaces/IProvingGround.sol` | Structs, events, errors |
+| `src/interfaces/IProvingGround.sol`, `IProvingGroundVault.sol` | Structs, events, errors |
 | `test/ShadowAccuracy.t.sol` | Twin-pool accuracy suite, run on three token pairs |
 | `test/ProvingGroundHook.t.sol` | Hook behaviour, guards, bonds, the one-shadow rule, dust accounting, gas |
 | `test/Mandate.t.sol` | Signed instructions and every mandate check at its limit, the price-check attack, fuzz tests |
+| `test/Vault.t.sol` | Going live, the deposit and withdrawal round trip, capacity, demotion, stake, live rebalancing, the loss limit, gas |
 | `test/Oracle.t.sol`, `test/ScoreMath.t.sol` | Unit and fuzz tests for the libraries |
 | `test/utils/TwinPools.sol` | The twin-pool test base |
 | `test/utils/` (other files) | Test scaffolding (see Credits) |
@@ -167,7 +238,8 @@ No partner integrations.
 
 - `test/utils/BaseTest.sol`, `test/utils/Deployers.sol` and `test/utils/libraries/EasyPosm.sol` are test scaffolding from the [Uniswap v4 template](https://github.com/uniswapfoundation/v4-template).
 - Hook base contract from [OpenZeppelin uniswap-hooks](https://github.com/OpenZeppelin/uniswap-hooks).
-- EIP-712 domain handling, signature checking (ECDSA and ERC-1271) and safe token transfers from [OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts).
+- EIP-712 domain handling, signature checking (ECDSA and ERC-1271), safe token transfers and the reentrancy guard from [OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts).
+- Vault shares use the `ERC6909` contract from [Uniswap v4-core](https://github.com/Uniswap/v4-core) (itself adapted from Solmate), and `LiquidityAmounts` from [v4-periphery](https://github.com/Uniswap/v4-periphery).
 - Precompiled v4 deployers for tests from [hookmate](https://github.com/akshatmittal/hookmate).
 - The oracle's design (one observation per block holding a running tick sum, kept in a ring buffer) follows Uniswap v3's oracle. The code here is written for this project.
 - Tests check the hook's amount maths against `LiquidityAmounts` from the v4-core test utilities.

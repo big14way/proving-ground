@@ -21,6 +21,9 @@ interface IProvingGround {
         // The cost of opening a shadow.
         uint32 minShadowAge; // seconds a shadow's bond stays locked, counted from when it was opened
         uint128 bondMin; // smallest bond, in the chain's native currency
+        // The vault contract that holds live liquidity. It alone may graduate a shadow and have a
+        // live intent checked. Zero if the hook is deployed without live vaults.
+        address vault;
     }
 
     /// @notice A curator's signed instruction to move a position to a new range.
@@ -61,6 +64,7 @@ interface IProvingGround {
         uint48 lastRebalanceAt;
         uint32 rebalances;
         uint128 bond; // native currency held for the curator until the shadow is closed and aged
+        bool graduated; // closed by going live, rather than abandoned
     }
 
     /// @notice A shadow's result at one valuation price. All amounts are in token1.
@@ -120,8 +124,10 @@ interface IProvingGround {
     error NoBond();
     error BondTransferFailed();
 
+    error NotVault();
+
     // Intent checks.
-    error LiveNotSupported();
+    error WrongIntentKind(); // a live intent sent to the hook, or a shadow intent sent to the vault
     error WrongPool();
     error IntentExpired();
     error BadNonce();

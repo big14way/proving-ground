@@ -82,6 +82,7 @@ contract ProvingGroundHookTest is TwinPools {
         assertEq(hook.MIN_REBALANCE_INTERVAL(), COOLDOWN);
         assertEq(hook.MIN_SHADOW_AGE(), MIN_AGE);
         assertEq(hook.BOND_MIN(), BOND);
+        assertEq(hook.VAULT(), vaultAt);
     }
 
     function test_config_invalidReverts() public {

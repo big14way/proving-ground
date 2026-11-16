@@ -37,6 +37,8 @@ import {ScoreMath} from "./libraries/ScoreMath.sol";
 ///  - The only work done during a swap is one oracle observation per block.
 /// A shadow is moved only by an instruction its curator signed (EIP-712), and only within the mandate:
 /// range width, a cooldown, and a pool price close to its time-weighted average.
+/// Real liquidity lives in a separate vault contract (`VAULT`). The vault cannot move it unless this
+/// hook has accepted the curator's signed instruction and passed it through the same mandate checks.
 contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround, EIP712 {
     using StateLibrary for IPoolManager;
     using PoolIdLibrary for PoolKey;
@@ -58,6 +60,7 @@ contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround, EIP712 
     uint32 public immutable MIN_REBALANCE_INTERVAL;
     uint32 public immutable MIN_SHADOW_AGE;
     uint128 public immutable BOND_MIN;
+    address public immutable VAULT;
 
     /// @notice Number of shadows ever opened. Shadow ids run from 1.
     uint256 public shadowCount;
@@ -95,6 +98,7 @@ contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround, EIP712 
         MIN_REBALANCE_INTERVAL = config.minRebalanceInterval;
         MIN_SHADOW_AGE = config.minShadowAge;
         BOND_MIN = config.bondMin;
+        VAULT = config.vault;
     }
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory permissions) {
@@ -197,11 +201,36 @@ contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround, EIP712 
     /// position would need. If the new range would hold more liquidity than the size cap allows, the
     /// position is placed at the cap and the remainder is kept as idle token1, which earns nothing.
     function rebalance(RebalanceIntent calldata intent, bytes calldata signature) external {
-        if (intent.live) revert LiveNotSupported();
+        if (intent.live) revert WrongIntentKind();
         Shadow storage s = _openShadow(intent.subjectId);
         if (PoolId.unwrap(intent.poolId) != PoolId.unwrap(s.poolId)) revert WrongPool();
         _useIntent(s.curator, intent, signature);
         _rebalanceShadow(s, intent.subjectId, intent.tickLower, intent.tickUpper);
+    }
+
+    /// @notice Called by the vault before it moves real liquidity. Verifies and spends the curator's
+    /// signed intent and applies the mandate checks a shadow rebalance goes through.
+    /// @param curator The vault's curator, whose signature the intent must carry.
+    /// @param lastPlacedAt When the vault's position was last placed, for the cooldown.
+    /// @return twap The pool's time-weighted average tick, which the vault values its holdings at.
+    function authorizeLive(
+        RebalanceIntent calldata intent,
+        bytes calldata signature,
+        address curator,
+        uint256 lastPlacedAt
+    ) external returns (int24 twap) {
+        if (msg.sender != VAULT) revert NotVault();
+        if (!intent.live) revert WrongIntentKind();
+        _useIntent(curator, intent, signature);
+        (, int24 tick,,) = poolManager.getSlot0(intent.poolId);
+        return _checkMandate(intent.poolId, tick, intent.tickLower, intent.tickUpper, lastPlacedAt);
+    }
+
+    /// @notice Called by the vault when a curator goes live: closes the shadow as graduated, freezes
+    /// its score and returns its bond. The vault has already checked the shadow's age and score.
+    function graduate(uint256 shadowId) external {
+        if (msg.sender != VAULT) revert NotVault();
+        _close(shadowId, _openShadow(shadowId), true);
     }
 
     /// @notice Cancels the caller's outstanding signed intents by moving their nonce forward.
@@ -214,12 +243,16 @@ contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround, EIP712 
     function closeShadow(uint256 shadowId) external {
         Shadow storage s = _openShadow(shadowId);
         if (msg.sender != s.curator) revert NotCurator();
+        _close(shadowId, s, false);
+    }
 
+    function _close(uint256 shadowId, Shadow storage s, bool graduated) internal {
         Score memory final_ = _score(s, _twapSqrtPrice(s.poolId));
         _finalScores[shadowId] = final_;
         s.closedAt = uint48(block.timestamp);
-        delete activeShadowOf[msg.sender][s.poolId];
-        curatorRecord[msg.sender].shadowsClosedWithoutGraduating += 1;
+        delete activeShadowOf[s.curator][s.poolId];
+        if (graduated) s.graduated = true;
+        else curatorRecord[s.curator].shadowsClosedWithoutGraduating += 1;
         _moveDust(s, shadowId, true, 0, 0);
         emit ShadowClosed(shadowId, final_.alphaBps, final_.alphaVsHoldBps, final_.navConservative);
 
@@ -255,22 +288,22 @@ contract ProvingGroundHook is BaseHook, IUnlockCallback, IProvingGround, EIP712 
         emit IntentUsed(curator, intent.nonce, msg.sender);
     }
 
-    /// @dev The mandate checks shared by every placement after the first.
-    function _checkMandate(Shadow storage s, PoolId poolId, int24 tick, int24 tickLower, int24 tickUpper)
+    /// @dev The mandate checks shared by every placement after the first, shadow or live.
+    function _checkMandate(PoolId poolId, int24 tick, int24 tickLower, int24 tickUpper, uint256 lastPlacedAt)
         internal
         view
+        returns (int24 twap)
     {
         Mandate.checkRange(tickLower, tickUpper, tick, _poolKeys[poolId].tickSpacing, MIN_WIDTH_TICKS, MAX_WIDTH_TICKS);
-        Mandate.checkCooldown(
-            block.timestamp, s.rebalances == 0 ? s.openedAt : s.lastRebalanceAt, MIN_REBALANCE_INTERVAL
-        );
-        Mandate.checkDeviation(tick, _twapTick(poolId, tick), MAX_DEVIATION_TICKS);
+        Mandate.checkCooldown(block.timestamp, lastPlacedAt, MIN_REBALANCE_INTERVAL);
+        twap = _twapTick(poolId, tick);
+        Mandate.checkDeviation(tick, twap, MAX_DEVIATION_TICKS);
     }
 
     function _rebalanceShadow(Shadow storage s, uint256 shadowId, int24 tickLower, int24 tickUpper) internal {
         PoolId poolId = s.poolId;
         (uint160 sqrtPriceX96, int24 tick,, uint24 lpFee) = poolManager.getSlot0(poolId);
-        _checkMandate(s, poolId, tick, tickLower, tickUpper);
+        _checkMandate(poolId, tick, tickLower, tickUpper, s.rebalances == 0 ? s.openedAt : s.lastRebalanceAt);
         uint128 active = poolManager.getLiquidity(poolId);
         if (active == 0) revert NoActiveLiquidity();
 

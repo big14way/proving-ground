@@ -38,6 +38,11 @@ library ScoreMath {
         return FullMath.mulDiv(FullMath.mulDiv(amount0, sqrtPriceX96, FixedPoint96.Q96), sqrtPriceX96, FixedPoint96.Q96);
     }
 
+    /// @notice Converts an amount of token1 into token0 at `sqrtPriceX96`.
+    function toToken0(uint256 amount1, uint160 sqrtPriceX96) internal pure returns (uint256) {
+        return FullMath.mulDiv(FullMath.mulDiv(amount1, FixedPoint96.Q96, sqrtPriceX96), FixedPoint96.Q96, sqrtPriceX96);
+    }
+
     /// @notice Value of a pair of token amounts, in token1.
     function valueOf(uint256 amount0, uint256 amount1, uint160 sqrtPriceX96) internal pure returns (uint256) {
         return toToken1(amount0, sqrtPriceX96) + amount1;

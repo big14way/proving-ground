@@ -151,7 +151,7 @@ contract MandateTest is TwinPools {
         _ready();
         IProvingGround.RebalanceIntent memory intent = _intent(shadowId, -600, 600);
         intent.live = true;
-        _rejects(intent, curatorKey, IProvingGround.LiveNotSupported.selector);
+        _rejects(intent, curatorKey, IProvingGround.WrongIntentKind.selector);
     }
 
     function test_intent_forAnUnknownShadowReverts() public {
