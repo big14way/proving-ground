@@ -259,6 +259,17 @@ forge script script/Deploy.s.sol --rpc-url <url> --private-key <key> --broadcast
 
 The hook and the vault name each other at construction. The script works out the address the vault will get, mines a CREATE2 salt that gives the hook its permission bits with that address in its constructor arguments, then deploys the hook and the vault. The pool manager is taken from `POOL_MANAGER`, or from the known address for the chain; on a local node a fresh one is deployed. Settings such as `MIN_SHADOW_AGE` and `TWAP_WINDOW` can be overridden with environment variables (see the script). `test/Deploy.t.sol` covers the same path, and the script has been run against a local node.
 
+### Testnet deployment
+
+Unichain Sepolia (chain id 1301), deployed with the script above against the canonical v4 pool manager `0x00B036B58a818B1BC34d502D3fE730Db729e62AC`.
+
+| Contract | Address |
+|---|---|
+| `ProvingGroundHook` | `0x317a059533Ceb38aB84a5e7887eB311676d3d080` |
+| `ProvingGroundVault` | `0xde5922f789865e06103275Fb108618DCA6889846` |
+
+This deployment uses short periods so the whole flow can be shown in one sitting: a 5-minute price average, a 10-minute minimum shadow age, a 1-minute cooldown and a 0.001 ETH bond. The other limits are the ones used in the tests.
+
 ## Layout
 
 | Path | What |
