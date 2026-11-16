@@ -285,6 +285,8 @@ On this deployment a shadow was opened, moved by a signed instruction, taken liv
 
 ## Frontend
 
+Live at **https://provinghq.vercel.app** (reads the Unichain Sepolia deployment). To run it locally:
+
 ```bash
 cd frontend
 npm install
