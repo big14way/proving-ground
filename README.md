@@ -293,17 +293,18 @@ npm run dev        # http://localhost:5183
 
 One page, reading the testnet deployment directly (no backend):
 
-- **The record.** Every shadow opened on the pool, open, live or abandoned, with its raw and conservative score.
-- **A shadow, drawn.** The selected shadow's value against the passive position and against simply holding, read from the hook at past blocks.
-- **Live vaults.** Value, score after fees, the multiple earned, capacity used, and in-kind deposit and withdrawal.
-- **The mandate.** The five checks, with the ones that depend on the pool evaluated live.
-- **The desk.** For a connected wallet: mint test tokens, swap, open a shadow, sign and submit a move (EIP-712 in the wallet), go live, move the vault, settle the fee. Contract refusals are shown as plain sentences.
+- **The desk.** An application window with tabs: the market (price, chart, buy and sell), each live vault (value, score, deposit and withdraw, and for its curator a signed move), each open shadow (value against the passive position, signed move, go live), the full record as a table, and a form to open a new shadow. Contract refusals are shown as plain sentences.
+- **The record.** Shadows on one side, graduated vaults on the other, with the best open score between them.
+- **The mandate.** The fixed limits every move must pass, read from the deployed contracts.
+- **A shadow's life.** The selected shadow's own chart, read from the hook at past blocks, with its five steps pinned to it.
+- **Vaults.** Value under management, score after fees, the multiple earned, the curator's stake and the room left.
+- **Questions.** How the score works and what protects a depositor.
 
 Add `?as=<address>` to the URL to see the page as that address sees it, read-only, without connecting a wallet.
 
 `frontend/scripts/demo.ts` runs the same actions from a terminal with a test key (`DEMO_PRIVATE_KEY=0x… npx tsx scripts/demo.ts status`; the commands are listed at the top of the file). It calls the same functions as the page's buttons, so it doubles as an end-to-end check of them. `npm run abi` regenerates the ABIs from the Foundry build output.
 
-The visual style (a printed record: warm paper, black ink, one dark-red accent, serif headings, ruled tables) follows the "Parallel — Finance" template on the Framer marketplace, studied from its public preview. No files or text from the template are used: the layout, mark, charts and wording here are written for this project.
+The design follows the "Halftone" trading-desk template on the Framer marketplace, studied from its public preview: the same sections in the same order, the same layout and component anatomy, and the same motion (the desk pins while the page scrolls past it and grows slightly as two notes fade in; the notes on the chart appear one after another; the ticker runs continuously). No files or text from the template are used. The wording, the mark, the charts and the live components are written for this project, and the three photographs are our own selection from Unsplash, credited in `frontend/public/photos/CREDITS.md`.
 
 ## Layout
 
@@ -340,7 +341,8 @@ No partner integrations.
 - EIP-712 domain handling, signature checking (ECDSA and ERC-1271), safe token transfers and the reentrancy guard from [OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts).
 - Vault shares use the `ERC6909` contract from [Uniswap v4-core](https://github.com/Uniswap/v4-core) (itself adapted from Solmate), and `LiquidityAmounts` from [v4-periphery](https://github.com/Uniswap/v4-periphery).
 - Precompiled v4 deployers for tests, and the per-chain v4 addresses used by the deploy script, from [hookmate](https://github.com/akshatmittal/hookmate). The deploy script mines the hook address with `HookMiner` from v4-periphery.
-- Frontend built with [Vite](https://vitejs.dev), [React](https://react.dev) and [viem](https://viem.sh). Typefaces: Newsreader and Instrument Sans (SIL Open Font License, via Google Fonts). Design reference credited in the Frontend section.
+- Frontend built with [Vite](https://vitejs.dev), [React](https://react.dev), [viem](https://viem.sh) and [Motion](https://motion.dev). Typefaces: Instrument Sans and Fragment Mono (SIL Open Font License, via Google Fonts). Design reference credited in the Frontend section.
+- Photographs by Diane Picchiottino, JC Gellidon and NASA, from Unsplash under the Unsplash License. Details in `frontend/public/photos/CREDITS.md`.
 - The demonstration pool's test tokens are Solmate's `MockERC20`, and swaps on the testnet go through the hookmate v4 router.
 - The oracle's design (one observation per block holding a running tick sum, kept in a ring buffer) follows Uniswap v3's oracle. The code here is written for this project.
 - Tests check the hook's amount maths against `LiquidityAmounts` from the v4-core test utilities.

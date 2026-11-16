@@ -441,3 +441,30 @@ export async function loadVaultHistory(
 export function rangeLabel(tickLower: number, tickUpper: number): { low: number; high: number } {
   return { low: tickToPrice(tickLower), high: tickToPrice(tickUpper) };
 }
+
+/** The pool price over the last `seconds`, read from the pool manager's storage at past blocks. */
+export async function loadPriceHistory(client: PublicClient, pool: Pool, seconds = 1800, points = 36): Promise<Point[]> {
+  const blockAt = (time: number) => pool.block - BigInt(pool.timestamp - time);
+  const start = pool.timestamp - seconds;
+  const times = Array.from({ length: points }, (_, i) => Math.round(start + (seconds * i) / (points - 1)));
+  const results = await Promise.all(
+    times.map((time) =>
+      client
+        .readContract({
+          address: addresses.poolManager,
+          abi: poolManagerAbi,
+          functionName: "extsload",
+          args: [slotHex(0n)],
+          blockNumber: blockAt(time),
+        })
+        .then((word) => {
+          const { sqrtPriceX96 } = decodeSlot0(word);
+          if (sqrtPriceX96 === 0n) return null;
+          return { time, value: sqrtPriceX96ToPrice(sqrtPriceX96), benchmark: 0, hold: 0 };
+        })
+        .catch(() => null),
+    ),
+  );
+  return results.filter((p): p is Point => p !== null);
+}
+
