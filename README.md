@@ -20,6 +20,8 @@ Built for the Uniswap Hook Incubator UHI11 Hookathon, themed track: Active Manag
 | Live rebalancing through the pool, with a loss limit | Built, tested |
 | Performance fee, paid only above a high-water mark against the passive benchmark | Built, tested |
 | Invariant tests over random sequences of actions | Built, passing |
+| Testnet deployment with a demonstration pool | Live on Unichain Sepolia |
+| Frontend: the record, a shadow's chart, vaults, the mandate, the curator's desk | Built, run against the testnet |
 
 ## How the shadow score works
 
@@ -270,6 +272,39 @@ Unichain Sepolia (chain id 1301), deployed with the script above against the can
 
 This deployment uses short periods so the whole flow can be shown in one sitting: a 5-minute price average, a 10-minute minimum shadow age, a 1-minute cooldown and a 0.001 ETH bond. The other limits are the ones used in the tests.
 
+A demonstration pool runs on the hook, set up by `script/SetupPool.s.sol`: two test tokens that anyone can mint, priced like ETH against USD, with three overlapping liquidity positions worth about 10 million test USD.
+
+| | Address |
+|---|---|
+| Test ETH, `pgETH` (currency0) | `0xEE83A0D9d02Ba63762D0C6cC6DaEb57438f74015` |
+| Test USD, `pgUSD` (currency1) | `0xFc99FE1A7c2b61F1C61267389939F9f0db99e174` |
+| Pool id | `0x52959c5f76f1fce16dddf31c16068014ce45b3d54da05b034598061fe31744af` |
+| Swap router (hookmate) | `0x9cD2b0a732dd5e023a5539921e0FD1c30E198Dba` |
+
+On this deployment a shadow was opened, moved by a signed instruction, taken live with a stake, and deposited into, all through the frontend's own code.
+
+## Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev        # http://localhost:5183
+```
+
+One page, reading the testnet deployment directly (no backend):
+
+- **The record.** Every shadow opened on the pool, open, live or abandoned, with its raw and conservative score.
+- **A shadow, drawn.** The selected shadow's value against the passive position and against simply holding, read from the hook at past blocks.
+- **Live vaults.** Value, score after fees, the multiple earned, capacity used, and in-kind deposit and withdrawal.
+- **The mandate.** The five checks, with the ones that depend on the pool evaluated live.
+- **The desk.** For a connected wallet: mint test tokens, swap, open a shadow, sign and submit a move (EIP-712 in the wallet), go live, move the vault, settle the fee. Contract refusals are shown as plain sentences.
+
+Add `?as=<address>` to the URL to see the page as that address sees it, read-only, without connecting a wallet.
+
+`frontend/scripts/demo.ts` runs the same actions from a terminal with a test key (`DEMO_PRIVATE_KEY=0x… npx tsx scripts/demo.ts status`; the commands are listed at the top of the file). It calls the same functions as the page's buttons, so it doubles as an end-to-end check of them. `npm run abi` regenerates the ABIs from the Foundry build output.
+
+The visual style (a printed record: warm paper, black ink, one dark-red accent, serif headings, ruled tables) follows the "Parallel — Finance" template on the Framer marketplace, studied from its public preview. No files or text from the template are used: the layout, mark, charts and wording here are written for this project.
+
 ## Layout
 
 | Path | What |
@@ -286,6 +321,8 @@ This deployment uses short periods so the whole flow can be shown in one sitting
 | `test/Vault.t.sol` | Going live, the deposit and withdrawal round trip, capacity, demotion, stake, live rebalancing, the loss limit, the performance fee, gas |
 | `test/Walkthrough.t.sol` | The end-to-end story, printed step by step |
 | `script/Deploy.s.sol`, `test/Deploy.t.sol` | Deployment of the hook and vault as a bound pair, and its test |
+| `script/SetupPool.s.sol` | Test tokens, a pool on the hook, liquidity and the dust reserve, for a demonstration |
+| `frontend/` | The one-page frontend (Vite, React, viem) and the terminal demo script |
 | `test/Invariants.t.sol` | Invariant properties of the vault and the hook under random sequences of actions |
 | `snapshots/` | Gas figures written by the tests |
 | `test/Oracle.t.sol`, `test/ScoreMath.t.sol` | Unit and fuzz tests for the libraries |
@@ -303,6 +340,8 @@ No partner integrations.
 - EIP-712 domain handling, signature checking (ECDSA and ERC-1271), safe token transfers and the reentrancy guard from [OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts).
 - Vault shares use the `ERC6909` contract from [Uniswap v4-core](https://github.com/Uniswap/v4-core) (itself adapted from Solmate), and `LiquidityAmounts` from [v4-periphery](https://github.com/Uniswap/v4-periphery).
 - Precompiled v4 deployers for tests, and the per-chain v4 addresses used by the deploy script, from [hookmate](https://github.com/akshatmittal/hookmate). The deploy script mines the hook address with `HookMiner` from v4-periphery.
+- Frontend built with [Vite](https://vitejs.dev), [React](https://react.dev) and [viem](https://viem.sh). Typefaces: Newsreader and Instrument Sans (SIL Open Font License, via Google Fonts). Design reference credited in the Frontend section.
+- The demonstration pool's test tokens are Solmate's `MockERC20`, and swaps on the testnet go through the hookmate v4 router.
 - The oracle's design (one observation per block holding a running tick sum, kept in a ring buffer) follows Uniswap v3's oracle. The code here is written for this project.
 - Tests check the hook's amount maths against `LiquidityAmounts` from the v4-core test utilities.
 
