@@ -134,6 +134,7 @@ contract VaultTest is VaultBase {
         assertEq(vault.ALPHA_STEP_BPS(), 50);
         assertEq(vault.LIVE_MAX_POOL_SHARE_BPS(), 1000);
         assertEq(vault.MAX_REBALANCE_LOSS_BPS(), 50);
+        assertEq(vault.PERF_FEE_BPS(), 1000);
     }
 
     function test_config_invalidReverts() public {
@@ -159,6 +160,11 @@ contract VaultTest is VaultBase {
 
         bad = _vaultConfig();
         bad.maxRebalanceLossBps = 10_001;
+        vm.expectRevert();
+        deployCodeTo("ProvingGroundVault.sol:ProvingGroundVault", abi.encode(hook, bad), vaultAt);
+
+        bad = _vaultConfig();
+        bad.perfFeeBps = 10_000;
         vm.expectRevert();
         deployCodeTo("ProvingGroundVault.sol:ProvingGroundVault", abi.encode(hook, bad), vaultAt);
     }
@@ -406,11 +412,12 @@ contract VaultTest is VaultBase {
         _flow(40);
         (uint256 before0, uint256 before1) = vault.holdings(vaultId);
 
-        // A depositor doubles the vault, then the curator's half is what the whole was before.
+        // After a deposit, what belongs to everyone else is what the whole vault was before it.
         _deposit(lp, vaultId, STAKE);
         (uint256 after0, uint256 after1) = vault.holdings(vaultId);
-        assertApproxEqAbs(after0 / 2, before0, 2);
-        assertApproxEqAbs(after1 / 2, before1, 2);
+        uint256 total = vault.getVault(vaultId).totalShares;
+        assertApproxEqAbs(after0 * (total - STAKE) / total, before0, 2);
+        assertApproxEqAbs(after1 * (total - STAKE) / total, before1, 2);
     }
 
     function test_deposit_respectsTheCallersMaximums() public {
@@ -734,6 +741,7 @@ contract VaultTest is VaultBase {
         (uint256 held0, uint256 held1) = vault.holdings(second);
         _withdraw(lp, first, 4e18);
         _withdraw(lp2, first, 1e18);
+        _withdraw(curator, first, vault.balanceOf(curator, first)); // the curator's fee shares
         vm.prank(curator);
         vault.unstake(first, STAKE, 0, 0);
         b = vault.getVault(second);
@@ -745,6 +753,7 @@ contract VaultTest is VaultBase {
 
         _withdraw(lp2, second, 9e18);
         _withdraw(lp, second, 1e18);
+        _withdraw(curator2, second, vault.balanceOf(curator2, second));
         vm.prank(curator2);
         vault.unstake(second, 30e18, 0, 0);
         assertEq(c0.balanceOf(address(vault)), 0);
@@ -1051,10 +1060,23 @@ contract VaultRebalanceTest is VaultBase {
         vault.rebalance(intent, signature);
         uint256 rebalance = vm.lastCallGas().gasTotalUsed;
 
+        _flow(80);
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+        assertGt(vault.standing(vaultId).feeSharesDue, 0);
+        vm.prank(stranger);
+        vault.settleFee(vaultId);
+        uint256 settle = vm.lastCallGas().gasTotalUsed;
+
         console2.log("  deposit, first by this address:", firstDeposit);
         console2.log("  deposit, later:                ", deposit);
         console2.log("  withdraw:                      ", withdraw);
         console2.log("  rebalance with a swap:         ", rebalance);
+        console2.log("  settle the fee:                ", settle);
+        vm.snapshotValue("vault", "deposit, first by an address", firstDeposit);
+        vm.snapshotValue("vault", "deposit", deposit);
+        vm.snapshotValue("vault", "withdraw", withdraw);
+        vm.snapshotValue("vault", "rebalance with a swap", rebalance);
+        vm.snapshotValue("vault", "settle fee", settle);
     }
 
     function testFuzz_rebalance_booksAlwaysMatchBalances(int24 lowerSteps, uint24 widthSteps, uint8 swaps) public {
@@ -1134,5 +1156,223 @@ contract VaultLossLimitTest is VaultBase {
 
         vm.expectPartialRevert(IProvingGroundVault.RebalanceLossTooHigh.selector);
         vault.rebalance(intent, signature);
+    }
+}
+
+/// @notice The performance fee: a share of what the vault gains on its benchmark, above a high-water mark.
+contract VaultFeeTest is VaultBase {
+    using PoolIdLibrary for PoolKey;
+    using StateLibrary for IPoolManager;
+
+    uint256 internal constant ONE = 1e18;
+    uint256 internal vaultId;
+
+    function setUp() public {
+        _start(_vaultConfig());
+        vaultId = _goLive(-300, 300, STAKE);
+        _deposit(lp, vaultId, 10e18);
+    }
+
+    function _mark() internal view returns (uint256) {
+        return vault.getVault(vaultId).highWaterMark;
+    }
+
+    /// @dev The fee the rule prescribes: shares worth 10% x (1 - mark / ratio) of the vault.
+    function _expectedFee(uint256 ratio, uint256 mark, uint256 supply)
+        internal
+        pure
+        returns (uint256 feeShares, uint256 fraction)
+    {
+        if (ratio <= mark) return (0, 0);
+        fraction = (ONE / 10) * (ratio - mark) / ratio;
+        feeShares = supply * fraction / (ONE - fraction);
+    }
+
+    function test_fee_startsLevelWithNothingDue() public {
+        assertEq(_mark(), ONE);
+        IProvingGroundVault.Standing memory st = vault.standing(vaultId);
+        assertApproxEqAbs(st.valueRatio, ONE, 1e6);
+        assertEq(st.feeSharesDue, 0);
+        assertEq(vault.settleFee(vaultId), 0);
+        assertEq(vault.balanceOf(curator, vaultId), 0);
+        assertEq(_mark(), ONE);
+    }
+
+    function test_fee_paidOnTheGainOverTheBenchmark() public {
+        _flow(120);
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+        IProvingGroundVault.Standing memory st = vault.standing(vaultId);
+        uint256 supply = vault.getVault(vaultId).totalShares;
+        (uint256 held0, uint256 held1) = vault.holdings(vaultId);
+        assertGt(st.valueRatio, ONE, "the vault is ahead of its benchmark");
+        (uint256 expected, uint256 fraction) = _expectedFee(st.valueRatio, ONE, supply);
+        assertEq(st.feeSharesDue, expected);
+
+        // Anyone can settle it. The shares go to the curator.
+        vm.prank(stranger);
+        uint256 feeShares = vault.settleFee(vaultId);
+        assertEq(feeShares, expected);
+        assertEq(vault.balanceOf(curator, vaultId), feeShares);
+        assertEq(vault.balanceOf(stranger, vaultId), 0);
+        assertEq(vault.getVault(vaultId).totalShares, supply + feeShares);
+        assertEq(vault.getVault(vaultId).curatorShares, STAKE, "the fee is not stake");
+
+        // Nothing left the vault: the fee is a claim on it, worth 10% of the gain over the mark.
+        (uint256 after0, uint256 after1) = vault.holdings(vaultId);
+        assertEq(after0, held0);
+        assertEq(after1, held1);
+        uint256 feeValue = st.nav * feeShares / (supply + feeShares);
+        assertApproxEqRel(feeValue, st.nav * (st.valueRatio - ONE) / st.valueRatio / 10, 1e9);
+
+        // The mark moves to where the vault stands after paying, and nothing more is due.
+        IProvingGroundVault.Standing memory post = vault.standing(vaultId);
+        assertApproxEqAbs(_mark(), st.valueRatio * (ONE - fraction) / ONE, 1e3);
+        assertApproxEqAbs(post.valueRatio, _mark(), 2);
+        assertEq(post.feeSharesDue, 0);
+        assertEq(vault.settleFee(vaultId), 0);
+        assertLt(post.liveAlphaBps, st.liveAlphaBps, "depositors' score is net of the fee");
+
+        console2.log("  score before the fee (bps):", st.liveAlphaBps);
+        console2.log("  score after the fee (bps): ", post.liveAlphaBps);
+        console2.log("  fee, share of the vault (1e18 = all):", fraction);
+    }
+
+    /// @dev A fall and a recovery over ground already paid for earn nothing. Only a new high does.
+    function test_fee_neverTwiceForTheSameGround() public {
+        _flow(120);
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+        uint256 first = vault.settleFee(vaultId);
+        assertGt(first, 0);
+        uint256 mark = _mark();
+
+        // The price leaves the range: the vault falls behind its benchmark.
+        _swapBoth(true, 60e18);
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+        IProvingGroundVault.Standing memory down = vault.standing(vaultId);
+        assertLt(down.valueRatio, mark);
+        assertEq(down.feeSharesDue, 0);
+        assertEq(vault.settleFee(vaultId), 0);
+        assertEq(_mark(), mark, "the mark does not come down");
+
+        // The price comes back. Whatever is due is measured from the mark, not from the low.
+        _swapBoth(false, 55e18);
+        _flow(40);
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+        IProvingGroundVault.Standing memory back = vault.standing(vaultId);
+        assertGt(back.valueRatio, down.valueRatio, "recovered");
+        uint256 supply = vault.getVault(vaultId).totalShares;
+        (uint256 fromMark,) = _expectedFee(back.valueRatio, mark, supply);
+        (uint256 fromLow,) = _expectedFee(back.valueRatio, down.valueRatio, supply);
+        uint256 second = vault.settleFee(vaultId);
+        assertEq(second, fromMark);
+        assertLt(second, fromLow, "the recovery itself is not paid for");
+        assertGe(_mark(), mark);
+        console2.log("  ratio at first fee, low, after recovery:", mark, down.valueRatio, back.valueRatio);
+        console2.log("  fee shares: first, second:", first, second);
+    }
+
+    /// @dev A deposit settles the fee before the newcomer's shares are counted, so gains made before
+    /// they arrived are charged to those who were there.
+    function test_fee_aDepositSettlesItFirst() public {
+        _flow(120);
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+        uint256 due = vault.standing(vaultId).feeSharesDue;
+        assertGt(due, 0);
+
+        (uint256 quote0, uint256 quote1) = vault.quoteDeposit(vaultId, 5e18);
+        (uint256 paid0, uint256 paid1) = _deposit(lp2, vaultId, 5e18);
+        assertEq(paid0, quote0);
+        assertEq(paid1, quote1);
+        assertEq(vault.balanceOf(curator, vaultId), due);
+        assertEq(vault.standing(vaultId).feeSharesDue, 0);
+
+        // The newcomer can leave at once with what they brought.
+        (uint256 out0, uint256 out1) = _withdraw(lp2, vaultId, 5e18);
+        assertLe(paid0 - out0, 3);
+        assertLe(paid1 - out1, 3);
+    }
+
+    /// @dev A withdrawal never touches the oracle, so it does not settle the fee.
+    function test_fee_aWithdrawalDoesNotSettleIt() public {
+        _flow(120);
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+        assertGt(vault.standing(vaultId).feeSharesDue, 0);
+        _withdraw(lp, vaultId, 10e18);
+        assertEq(vault.balanceOf(curator, vaultId), 0);
+        assertEq(_mark(), ONE);
+        assertGt(vault.standing(vaultId).feeSharesDue, 0, "still due, on what remains");
+    }
+
+    function test_fee_sharesAreOrdinarySharesTheCuratorCanRedeem() public {
+        _flow(120);
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+        uint256 feeShares = vault.settleFee(vaultId);
+        assertEq(vault.outsideShares(vaultId), 10e18 + feeShares);
+
+        (uint256 held0, uint256 held1) = vault.holdings(vaultId);
+        uint256 supply = vault.getVault(vaultId).totalShares;
+        (uint256 out0, uint256 out1) = _withdraw(curator, vaultId, feeShares);
+        assertApproxEqAbs(out0, held0 * feeShares / supply, 2);
+        assertApproxEqAbs(out1, held1 * feeShares / supply, 2);
+        assertGt(out0 + out1, 0);
+        _assertBooksMatchBalances(vaultId);
+    }
+
+    function test_fee_guards() public {
+        vm.expectRevert(IProvingGroundVault.UnknownVault.selector);
+        vault.settleFee(999);
+
+        _withdraw(lp, vaultId, 10e18);
+        vm.prank(curator);
+        vault.unstake(vaultId, STAKE, 0, 0);
+        vm.expectRevert(IProvingGroundVault.VaultIsClosed.selector);
+        vault.settleFee(vaultId);
+    }
+
+    function testFuzz_fee_followsTheRuleAndTheMarkOnlyRises(uint8 swaps, uint8 drift, uint8 more) public {
+        _flow(20 + uint256(swaps) % 100);
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+        for (uint256 round; round < 3; ++round) {
+            IProvingGroundVault.Standing memory st = vault.standing(vaultId);
+            uint256 mark = _mark();
+            uint256 supply = vault.getVault(vaultId).totalShares;
+            (uint256 expected,) = _expectedFee(st.valueRatio, mark, supply);
+
+            uint256 feeShares = vault.settleFee(vaultId);
+            assertEq(feeShares, expected);
+            if (st.valueRatio <= mark) assertEq(feeShares, 0, "nothing at or below the mark");
+            assertGe(_mark(), mark, "the mark only rises");
+            IProvingGroundVault.Standing memory post = vault.standing(vaultId);
+            assertEq(post.feeSharesDue, 0, "nothing more is due right after");
+            if (feeShares != 0) {
+                assertApproxEqAbs(post.valueRatio, _mark(), 2, "the mark is where the vault now stands");
+            }
+
+            // Something happens before the next round: a drift out and back, or more in-range flow.
+            if (round == 0) {
+                _swapBoth(drift % 2 == 0, (5 + uint256(drift) % 40) * 1e18);
+            } else {
+                _flow(uint256(more) % 60);
+            }
+            vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+        }
+    }
+}
+
+/// @notice With the fee set to zero, nothing is ever minted to the curator.
+contract VaultNoFeeTest is VaultBase {
+    function test_noFee_nothingIsEverDue() public {
+        IProvingGroundVault.VaultConfig memory config = _vaultConfig();
+        config.perfFeeBps = 0;
+        _start(config);
+        uint256 vaultId = _goLive(-300, 300, STAKE);
+        _flow(120);
+        vm.warp(vm.getBlockTimestamp() + TWAP_WINDOW);
+        IProvingGroundVault.Standing memory st = vault.standing(vaultId);
+        assertGt(st.valueRatio, 1e18);
+        assertEq(st.feeSharesDue, 0);
+        assertEq(vault.settleFee(vaultId), 0);
+        _deposit(lp, vaultId, 5e18);
+        assertEq(vault.balanceOf(curator, vaultId), 0);
     }
 }

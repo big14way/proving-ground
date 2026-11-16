@@ -150,7 +150,8 @@ abstract contract TwinPools is BaseTest {
             maxMultiple: 10,
             alphaStepBps: 50,
             liveMaxPoolShareBps: 1000,
-            maxRebalanceLossBps: 50
+            maxRebalanceLossBps: 50,
+            perfFeeBps: 1000
         });
     }
 

@@ -15,6 +15,7 @@ interface IProvingGroundVault {
         uint16 alphaStepBps; // each step of score adds one to the multiple
         uint16 liveMaxPoolShareBps; // largest vault position, as a share of the pool's active liquidity
         uint16 maxRebalanceLossBps; // most value a single rebalance may lose, measured at the time-weighted price
+        uint16 perfFeeBps; // the curator's share of what the vault gains on its benchmark above the high-water mark
     }
 
     /// @notice A curator's live position and the claims on it.
@@ -38,17 +39,22 @@ interface IProvingGroundVault {
         uint48 lastRebalanceAt;
         uint48 closedAt; // set when the last share is redeemed
         uint32 rebalances;
+        // The highest value per share, relative to the benchmark, that a fee has been paid up to.
+        // 1e18 is level with the benchmark, and it starts there.
+        uint256 highWaterMark;
     }
 
     /// @notice A vault's standing at the pool's time-weighted price. Values are in token1.
     struct Standing {
         uint256 nav; // position, uncollected fees and idle balances
         uint256 navBenchmark; // the benchmark, scaled to the shares now outstanding
+        uint256 valueRatio; // nav over navBenchmark, 1e18 = level
         int256 liveAlphaBps; // value per share against the benchmark, since the vault opened
         int256 capacityAlphaBps; // the score that sets capacity: the shadow's at first, then the live one
         uint256 multiple; // total shares allowed per share of curator stake
         uint256 maxTotalShares; // capacity
         bool demoted; // live score below the demotion line: no new deposits
+        uint256 feeSharesDue; // shares a fee settlement would mint to the curator now
     }
 
     event VaultOpened(
@@ -75,6 +81,9 @@ interface IProvingGroundVault {
         uint256 valueAfter
     );
     event VaultClosed(uint256 indexed vaultId);
+    event FeeSettled(
+        uint256 indexed vaultId, address indexed curator, uint256 feeShares, uint256 valueRatio, uint256 highWaterMark
+    );
 
     error InvalidVaultConfig();
     error NotPoolManager();

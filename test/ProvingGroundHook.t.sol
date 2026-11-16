@@ -611,6 +611,10 @@ contract ProvingGroundHookTest is TwinPools {
         console2.log("swap gas, hook, first swap of a block, oracle ring full:", firstOfBlockRingFull);
 
         assertEq(five, none, "open shadows add nothing to a swap");
+        vm.snapshotValue("swap", "pool without the hook", plain);
+        vm.snapshotValue("swap", "hook, shadows open or not", none);
+        vm.snapshotValue("swap", "hook, first swap of a block, new oracle slot", firstOfBlock);
+        vm.snapshotValue("swap", "hook, first swap of a block, oracle ring full", firstOfBlockRingFull);
     }
 }
 

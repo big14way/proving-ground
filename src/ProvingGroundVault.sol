@@ -38,6 +38,8 @@ import {ScoreMath} from "./libraries/ScoreMath.sol";
 ///    vault then refuses any execution that loses more than `MAX_REBALANCE_LOSS_BPS` of value.
 ///  - Outside money is capped at a multiple of the curator's own stake. The multiple is earned by
 ///    score: the shadow's at first, the vault's own once it has run for `MIN_SHADOW_AGE`.
+///  - The curator is paid a share of what the vault gains on a passive full-range position, and only
+///    above a high-water mark, so never for matching the market and never twice for the same ground.
 /// Shares are ERC-6909 tokens, one id per vault. The curator's stake is tracked separately and cannot
 /// be transferred. Fee-on-transfer and rebasing tokens are not supported.
 contract ProvingGroundVault is IProvingGroundVault, IUnlockCallback, ERC6909, ReentrancyGuard {
@@ -60,6 +62,10 @@ contract ProvingGroundVault is IProvingGroundVault, IUnlockCallback, ERC6909, Re
     uint256 public immutable ALPHA_STEP_BPS;
     uint256 public immutable LIVE_MAX_POOL_SHARE_BPS;
     uint256 public immutable MAX_REBALANCE_LOSS_BPS;
+    uint256 public immutable PERF_FEE_BPS;
+
+    /// @dev Fixed-point one, for the value ratio and the high-water mark.
+    uint256 internal constant ONE = 1e18;
 
     mapping(uint256 => Vault) internal _vaults;
     mapping(PoolId => PoolKey) internal _poolKeys;
@@ -88,6 +94,7 @@ contract ProvingGroundVault is IProvingGroundVault, IUnlockCallback, ERC6909, Re
             hook.VAULT() != address(this) || config.baseMultiple == 0 || config.maxMultiple < config.baseMultiple
                 || config.alphaStepBps == 0 || config.liveMaxPoolShareBps == 0
                 || config.liveMaxPoolShareBps > ScoreMath.BPS || config.maxRebalanceLossBps > ScoreMath.BPS
+                || config.perfFeeBps >= ScoreMath.BPS
         ) revert InvalidVaultConfig();
         HOOK = hook;
         poolManager = hook.poolManager();
@@ -100,6 +107,7 @@ contract ProvingGroundVault is IProvingGroundVault, IUnlockCallback, ERC6909, Re
         ALPHA_STEP_BPS = config.alphaStepBps;
         LIVE_MAX_POOL_SHARE_BPS = config.liveMaxPoolShareBps;
         MAX_REBALANCE_LOSS_BPS = config.maxRebalanceLossBps;
+        PERF_FEE_BPS = config.perfFeeBps;
     }
 
     // ------------------------------------------------------------------------------------------
@@ -139,6 +147,7 @@ contract ProvingGroundVault is IProvingGroundVault, IUnlockCallback, ERC6909, Re
         v.tickUpper = s.tickUpper;
         v.openedAt = uint48(block.timestamp);
         v.shadowAlphaBps = alpha;
+        v.highWaterMark = ONE;
 
         (uint256 paid0, uint256 paid1) =
             _unlock(Call(Action.Enter, vaultId, msg.sender, liquidity, max0, max1, 0, 0, 0));
@@ -175,6 +184,8 @@ contract ProvingGroundVault is IProvingGroundVault, IUnlockCallback, ERC6909, Re
         Vault storage v = _openVault(vaultId);
         if (shares == 0) revert ZeroShares();
         Standing memory st = _standing(v, vaultId);
+        // Any fee owed on gains so far is taken first, so the newcomer does not pay for gains they missed.
+        if (_settleFee(v, vaultId, st) != 0) st = _standing(v, vaultId);
         if (st.demoted) revert Demoted(st.liveAlphaBps);
         if (v.totalShares + shares > st.maxTotalShares) revert OverCapacity(st.maxTotalShares);
 
@@ -245,6 +256,41 @@ contract ProvingGroundVault is IProvingGroundVault, IUnlockCallback, ERC6909, Re
     }
 
     // ------------------------------------------------------------------------------------------
+    // Performance fee
+    // ------------------------------------------------------------------------------------------
+
+    /// @notice Pays the curator their fee, in new shares of the vault. Anyone may call it.
+    /// @dev Let R be the vault's value per share over the benchmark's value per share, and H the
+    /// high-water mark. If R is above H the curator is minted shares worth `PERF_FEE_BPS x (1 - H/R)`
+    /// of the vault, and H moves to R as it stands after that dilution. Nothing is paid at or below H.
+    /// Deposits settle the fee first. Withdrawals do not, so that they never depend on the oracle.
+    function settleFee(uint256 vaultId) external nonReentrant returns (uint256 feeShares) {
+        Vault storage v = _openVault(vaultId);
+        return _settleFee(v, vaultId, _standing(v, vaultId));
+    }
+
+    function _settleFee(Vault storage v, uint256 vaultId, Standing memory st) internal returns (uint256 feeShares) {
+        feeShares = st.feeSharesDue;
+        if (feeShares == 0) return 0;
+        (, uint256 mark) = _feeDue(v, st.valueRatio);
+        v.totalShares += feeShares;
+        v.highWaterMark = mark;
+        _mint(v.curator, vaultId, feeShares);
+        emit FeeSettled(vaultId, v.curator, feeShares, st.valueRatio, mark);
+    }
+
+    /// @dev The fee shares due at a value ratio, and the high-water mark after they are minted.
+    function _feeDue(Vault storage v, uint256 valueRatio) internal view returns (uint256 feeShares, uint256 mark) {
+        mark = v.highWaterMark;
+        if (valueRatio <= mark) return (0, mark);
+        // The fee as a fraction of the whole vault.
+        uint256 fraction = FullMath.mulDiv(PERF_FEE_BPS * ONE / ScoreMath.BPS, valueRatio - mark, valueRatio);
+        feeShares = FullMath.mulDiv(v.totalShares, fraction, ONE - fraction);
+        // The mark moves to the ratio as it stands once the new shares exist.
+        if (feeShares != 0) mark = FullMath.mulDivRoundingUp(valueRatio, v.totalShares, v.totalShares + feeShares);
+    }
+
+    // ------------------------------------------------------------------------------------------
     // Rebalancing
     // ------------------------------------------------------------------------------------------
 
@@ -295,11 +341,11 @@ contract ProvingGroundVault is IProvingGroundVault, IUnlockCallback, ERC6909, Re
         return _standing(_knownVault(vaultId), vaultId);
     }
 
-    /// @notice What buying `shares` would cost at the pool's current price. Use it to set the
-    /// `max0` and `max1` of a deposit; the price can move before the deposit lands.
+    /// @notice What buying `shares` would cost at the pool's current price, after any fee due is
+    /// settled. Use it to set the `max0` and `max1` of a deposit; the price can move before the deposit lands.
     function quoteDeposit(uint256 vaultId, uint256 shares) external view returns (uint256 amount0, uint256 amount1) {
         Vault storage v = _openVault(vaultId);
-        uint256 supply = v.totalShares;
+        uint256 supply = v.totalShares + _standing(v, vaultId).feeSharesDue;
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(v.poolId);
         uint128 added = FullMath.mulDivRoundingUp(v.liquidity, shares, supply).toUint128();
         (amount0, amount1) = _amountsRoundingUp(sqrtPriceX96, v.tickLower, v.tickUpper, added);
@@ -334,6 +380,10 @@ contract ProvingGroundVault is IProvingGroundVault, IUnlockCallback, ERC6909, Re
             st.navBenchmark = FullMath.mulDiv(bench, v.totalShares, v.benchShares);
         }
         st.liveAlphaBps = ScoreMath.alphaBps(st.nav, st.navBenchmark);
+        if (st.navBenchmark != 0) {
+            st.valueRatio = FullMath.mulDiv(st.nav, ONE, st.navBenchmark);
+            (st.feeSharesDue,) = _feeDue(v, st.valueRatio);
+        }
 
         // The shadow's record counts until the live one is as long as the shadow had to be.
         st.capacityAlphaBps =

@@ -18,7 +18,8 @@ Built for the Uniswap Hook Incubator UHI11 Hookathon, themed track: Active Manag
 | Live vaults: going live, in-kind deposits and withdrawals, shares | Built, tested |
 | Capacity earned by score, pool-share cap, demotion | Built, tested |
 | Live rebalancing through the pool, with a loss limit | Built, tested |
-| Performance fee | Not built yet |
+| Performance fee, paid only above a high-water mark against the passive benchmark | Built, tested |
+| Invariant tests over random sequences of actions | Built, passing |
 
 ## How the shadow score works
 
@@ -99,6 +100,20 @@ In the tests the base is 2, each 50 bps of score adds 1, and the maximum is 10. 
 - **Demotion.** A vault whose own score is below −200 bps takes no new deposits. Withdrawals are unaffected.
 - **Stake.** The curator can add stake at any time, and can take out only what is not needed to back the outside deposits at the current multiple. Taking out the last share closes the vault.
 
+### Performance fee
+
+The curator is paid a share (10% in the tests) of what the vault gains **on its benchmark**, and only above a high-water mark:
+
+```
+R = vault value per share / benchmark value per share      (both at the time-weighted price)
+if R > H:  mint the curator shares worth  fee x (1 - H/R)  of the vault, then set H to R after that dilution
+```
+
+- `H` starts level with the benchmark. Matching a passive position earns nothing, and falling behind and recovering over ground already paid for earns nothing.
+- The fee is paid in new shares of the vault, so no tokens leave it. They are ordinary shares the curator can redeem; they are not stake.
+- Anyone can call `settleFee`. A deposit settles it first, so a newcomer is not charged for gains made before they arrived. A withdrawal does not, so that it never depends on the oracle.
+- The score a vault reports is net of fees. In the test run it is 114 bps before the fee and 103 bps after.
+
 ### Moving live liquidity
 
 The vault calls the hook's `authorizeLive`, which verifies the signature, nonce and deadline and applies the range, cooldown and price checks. Then, in one pool-manager unlock, the vault:
@@ -177,9 +192,23 @@ Open shadows add nothing to a swap; the test asserts the two figures are equal. 
 
 | Vault operation | Gas |
 |---|---|
-| Deposit | 239,529 (256,629 for an address's first shares) |
-| Withdraw | 167,165 |
-| Rebalance with a swap | 476,606 |
+| Deposit | 242,857 (259,957 for an address's first shares) |
+| Withdraw | 167,200 |
+| Rebalance with a swap | 476,650 |
+| Settle the fee | 154,055 |
+
+The figures in both tables are written to `snapshots/` by the tests, so a change shows up in a diff.
+
+### Invariants
+
+`test/Invariants.t.sol` lets the fuzzer call deposits, withdrawals, stake changes, swaps, waits, vault and shadow rebalances, fee settlements and shadow closures in random order (24 runs of 80 calls for each property), and checks after every call that:
+
+- the vault contract holds exactly the idle tokens on its books, its position in the pool is the liquidity on its books, and the shares add up to the total;
+- no withdrawal was ever rejected;
+- a fee was only ever taken above the high-water mark, and the mark never came down;
+- the hook holds exactly its dust reserve in tokens and exactly the unreturned bonds in native currency.
+
+At the end of every run everyone redeems everything. The vault must pay it all out and be left with a zero balance of both tokens.
 
 ### Limits of these tests and of the design so far
 
@@ -193,7 +222,9 @@ Open shadows add nothing to a swap; the test asserts the two figures are equal. 
 - Whoever submits a signed instruction picks the moment, anywhere before its deadline. A curator limits that with a short deadline.
 - A shadow can step out of the market by rebalancing into a range too narrow to hold its value under the size cap; the remainder waits as idle token1. It pays the modelled cost of that sale, and it can only do so at a price that passes the price check.
 - A curator contract that cannot receive native currency cannot take its bond back.
-- There is no performance fee yet, so a curator earns only on their own stake.
+- The fee is taken on each new high and is not given back if the vault later falls behind.
+- A depositor who withdraws before the fee is settled leaves without paying it on gains since the last settlement. That is the curator's loss, and anyone can settle at any time.
+- Fee shares count as outside shares, so they need stake behind them like any deposit, and the curator must redeem them before taking out the last of the stake.
 - Deposits have no lock-up. Someone can deposit just before fees accrue and withdraw just after, taking a share of them. Capacity and the pool-share cap limit how much.
 - The loss limit bounds what a sandwich can take from one rebalance. It does not make that zero.
 - A vault sitting at the pool-share cap takes no deposits, because a deposit must add to the position. It reopens when the pool grows or the curator moves to a wider range.
@@ -210,14 +241,14 @@ cd proving-ground
 forge test -vv
 ```
 
-Requires [Foundry](https://book.getfoundry.sh/). Compiles with solc 0.8.30, `via_ir`, EVM version cancun. 200 tests.
+Requires [Foundry](https://book.getfoundry.sh/). Compiles with solc 0.8.30, `via_ir`, EVM version cancun. 212 tests, including three invariant properties.
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `src/ProvingGroundHook.sol` | The hook: pool registration, oracle writes, shadow lifecycle, signed instructions for shadows and vaults, bonds, scoring views, dust positions |
-| `src/ProvingGroundVault.sol` | Live vaults: going live, in-kind deposits and withdrawals, ERC-6909 shares, capacity, live rebalancing |
+| `src/ProvingGroundVault.sol` | Live vaults: going live, in-kind deposits and withdrawals, ERC-6909 shares, capacity, live rebalancing, performance fee |
 | `src/libraries/Oracle.sol` | Observation ring buffer and time-weighted tick |
 | `src/libraries/ScoreMath.sol` | Position amounts and values, fee and haircut maths, rebalance plan and cost, alpha |
 | `src/libraries/Mandate.sol` | The instruction's EIP-712 hash and the range, cooldown and price checks |
@@ -225,7 +256,9 @@ Requires [Foundry](https://book.getfoundry.sh/). Compiles with solc 0.8.30, `via
 | `test/ShadowAccuracy.t.sol` | Twin-pool accuracy suite, run on three token pairs |
 | `test/ProvingGroundHook.t.sol` | Hook behaviour, guards, bonds, the one-shadow rule, dust accounting, gas |
 | `test/Mandate.t.sol` | Signed instructions and every mandate check at its limit, the price-check attack, fuzz tests |
-| `test/Vault.t.sol` | Going live, the deposit and withdrawal round trip, capacity, demotion, stake, live rebalancing, the loss limit, gas |
+| `test/Vault.t.sol` | Going live, the deposit and withdrawal round trip, capacity, demotion, stake, live rebalancing, the loss limit, the performance fee, gas |
+| `test/Invariants.t.sol` | Invariant properties of the vault and the hook under random sequences of actions |
+| `snapshots/` | Gas figures written by the tests |
 | `test/Oracle.t.sol`, `test/ScoreMath.t.sol` | Unit and fuzz tests for the libraries |
 | `test/utils/TwinPools.sol` | The twin-pool test base |
 | `test/utils/` (other files) | Test scaffolding (see Credits) |
