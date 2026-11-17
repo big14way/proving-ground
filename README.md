@@ -248,7 +248,7 @@ Requires [Foundry](https://book.getfoundry.sh/). Compiles with solc 0.8.30, `via
 ### Coverage
 
 ```bash
-forge coverage --ir-minimum --no-match-coverage "(test|script|lib)/" --no-match-test test_contractsFitTheSizeLimit
+FORGE_SNAPSHOT_EMIT=false forge coverage --ir-minimum --no-match-coverage "(test|script|lib)/" --no-match-test test_contractsFitTheSizeLimit
 ```
 
 | File | Lines | Statements | Branches | Functions |
@@ -260,7 +260,7 @@ forge coverage --ir-minimum --no-match-coverage "(test|script|lib)/" --no-match-
 | `ScoreMath.sol` | 100.00% (49/49) | 98.41% (62/63) | 88.89% (8/9) | 100.00% (10/10) |
 | **Total** | **99.45%** (717/721) | **98.02%** (891/909) | **86.71%** (124/143) | **100.00%** (92/92) |
 
-The size-limit test is left out of the coverage run because coverage compiles without the optimizer, so the contracts are larger there than the ones that ship.
+The size-limit test is left out of the coverage run because coverage compiles without the optimizer, so the contracts are larger there than the ones that ship. For the same reason `FORGE_SNAPSHOT_EMIT=false` keeps the run from overwriting the gas snapshots.
 
 ### The whole story in one run
 
