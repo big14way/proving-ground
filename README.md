@@ -323,6 +323,10 @@ One page, reading the testnet deployment directly (no backend):
 
 Add `?as=<address>` to the URL to see the page as that address sees it, read-only, without connecting a wallet.
 
+The page has been run end to end with a browser wallet (MetaMask) on the testnet: minting test tokens, a swap, opening a shadow, an EIP-712 signed move, going live with a stake, and the refusal shown while a shadow's score is below the line. That run produced the second curator on the record (shadow 3, now vault 3): a narrow range that fell behind the passive position when the price rose through it, was re-centred by a signed move, and went live once its score was back above zero.
+
+Reads go to the chain's public endpoint. Calls made in the same moment travel as one request, answers for past blocks are kept, a hidden tab stops reading, and a second public endpoint takes over if the first turns a request away.
+
 `frontend/scripts/demo.ts` runs the same actions from a terminal with a test key (`DEMO_PRIVATE_KEY=0x… npx tsx scripts/demo.ts status`; the commands are listed at the top of the file). It calls the same functions as the page's buttons, so it doubles as an end-to-end check of them. `npm run abi` regenerates the ABIs from the Foundry build output.
 
 The design follows the "Halftone" trading-desk template on the Framer marketplace, studied from its public preview: the same sections in the same order, the same layout and component anatomy, and the same motion (the desk pins while the page scrolls past it and grows slightly as two notes fade in; the notes on the chart appear one after another; the ticker runs continuously). No files or text from the template are used. The wording, the mark, the charts and the live components are written for this project, and the three photographs are our own selection from Unsplash, credited in `frontend/public/photos/CREDITS.md`.
