@@ -38,13 +38,21 @@ export const intentTypedData = {
 const busyEndpoint = (error: unknown) =>
   error instanceof BaseError && /rate limit|too many requests/i.test(`${error.message} ${error.details}`);
 
-/** A public endpoint sometimes turns a request away when it is busy. Waits a moment and asks again, twice. */
+/** When this page's latest transaction was mined. */
+let settledAt = 0;
+const justSettled = () => Date.now() - settledAt < 20_000;
+
+/**
+ * Asks again, twice, in the two cases where a refusal may not be real: the public endpoint is busy,
+ * or it answers from a block that does not yet hold the transaction this page has just had mined
+ * (an approval, say), so the next step looks as if it would fail.
+ */
 async function patiently<T>(job: () => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await job();
     } catch (error) {
-      if (attempt === 2 || !busyEndpoint(error)) throw error;
+      if (attempt === 2 || !(busyEndpoint(error) || justSettled())) throw error;
       await new Promise((resolve) => setTimeout(resolve, 2500));
     }
   }
@@ -60,6 +68,7 @@ async function send(c: Clients, request: Parameters<typeof c.publicClient.simula
   const hash = await c.walletClient.writeContract({ ...prepared, account } as never);
   const receipt = await c.publicClient.waitForTransactionReceipt({ hash });
   if (receipt.status !== "success") throw new Error("The transaction was mined but failed.");
+  settledAt = Date.now();
   return hash;
 }
 
@@ -223,6 +232,7 @@ export function explain(error: unknown): string {
     if (reverted instanceof ContractFunctionRevertedError) {
       const name = reverted.data?.errorName ?? "";
       if (reasons[name]) return reasons[name];
+      if (name === "Panic") return "The contract hit an arithmetic error, most often because a token approval has not reached the network yet. Wait a few seconds and try again.";
       if (name) return `The contract refused: ${name}.`;
     }
     if (/User rejected|denied/i.test(error.shortMessage)) return "You cancelled the request in your wallet.";

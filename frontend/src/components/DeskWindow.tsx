@@ -540,6 +540,13 @@ function ShadowForm({ shadow, snapshot, busy, run, now, connected }: FormProps &
           >
             {connected ? "Go live" : "Connect wallet"}
           </button>
+          {(!oldEnough || !goodEnough) && (
+            <p className="note warn">
+              {!goodEnough
+                ? `Going live needs a score of at least ${bps(mandate.graduationBps)} against passive. This shadow is not there yet.`
+                : `Going live needs ${duration(mandate.minAge)} of record first.`}
+            </p>
+          )}
         </>
       )}
       <button className="textlink" disabled={busy} onClick={() => run("Closing the shadow", (c) => actions.closeShadow(c, shadow.id))}>
