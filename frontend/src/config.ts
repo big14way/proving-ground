@@ -5,7 +5,8 @@ export const chain = defineChain({
   id: 1301,
   name: "Unichain Sepolia",
   nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-  rpcUrls: { default: { http: ["https://sepolia.unichain.org"] } },
+  // The chain's own endpoint keeps old state, which the charts read. The second is a spare for when the first is busy.
+  rpcUrls: { default: { http: ["https://sepolia.unichain.org", "https://unichain-sepolia-rpc.publicnode.com"] } },
   blockExplorers: { default: { name: "Uniscan", url: "https://sepolia.uniscan.xyz" } },
   contracts: { multicall3: { address: "0xcA11bde05977b3631167028862bE2a173976CA11" } },
   testnet: true,

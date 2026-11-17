@@ -35,9 +35,26 @@ export const intentTypedData = {
   primaryType: "RebalanceIntent",
 } as const;
 
+const busyEndpoint = (error: unknown) =>
+  error instanceof BaseError && /rate limit|too many requests/i.test(`${error.message} ${error.details}`);
+
+/** A public endpoint sometimes turns a request away when it is busy. Waits a moment and asks again, twice. */
+async function patiently<T>(job: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await job();
+    } catch (error) {
+      if (attempt === 2 || !busyEndpoint(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
+  }
+}
+
 async function send(c: Clients, request: Parameters<typeof c.publicClient.simulateContract>[0]): Promise<Hex> {
   // Simulating first turns a revert into a readable error before the wallet is asked to sign.
-  const { request: prepared } = await c.publicClient.simulateContract({ ...request, account: c.account } as never);
+  const { request: prepared } = await patiently(() =>
+    c.publicClient.simulateContract({ ...request, account: c.account } as never),
+  );
   // A browser wallet signs by address; a local key (the terminal script) signs with the account object.
   const account = c.walletClient.account ?? c.account;
   const hash = await c.walletClient.writeContract({ ...prepared, account } as never);
@@ -210,6 +227,9 @@ export function explain(error: unknown): string {
     }
     if (/User rejected|denied/i.test(error.shortMessage)) return "You cancelled the request in your wallet.";
     if (/insufficient funds/i.test(error.message)) return "This wallet does not have enough test ETH for gas.";
+    if (busyEndpoint(error)) return "The network's public endpoint is busy and turned the request away. Nothing was sent. Wait a few seconds and try again.";
+    // A bare "request failed" says nothing; the endpoint's own words are in the details.
+    if (/^RPC Request failed/i.test(error.shortMessage) && error.details) return `The network refused the request: ${error.details}`;
     return error.shortMessage;
   }
   return error instanceof Error ? error.message : "Something went wrong.";

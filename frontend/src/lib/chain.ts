@@ -1,9 +1,15 @@
-import { createPublicClient, createWalletClient, custom, http, type Address, type WalletClient } from "viem";
+import { createPublicClient, createWalletClient, custom, fallback, http, type Address, type WalletClient } from "viem";
 import { chain } from "../config";
+
+const [main, spare] = chain.rpcUrls.default.http;
 
 export const publicClient = createPublicClient({
   chain,
-  transport: http(undefined, { timeout: 15_000, retryCount: 2 }),
+  transport: fallback([
+    // Reads made in the same moment travel as one request, so a chart of thirty past blocks is one call, not thirty.
+    http(main, { batch: { batchSize: 40, wait: 20 }, timeout: 15_000, retryCount: 2 }),
+    http(spare, { timeout: 15_000, retryCount: 1 }),
+  ]),
   batch: { multicall: { wait: 20 } },
 });
 

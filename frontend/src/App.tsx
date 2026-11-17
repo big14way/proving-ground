@@ -77,13 +77,17 @@ export default function App() {
       .catch((e: unknown) => setError(e instanceof Error ? e.message : "Could not reach the network."));
   }, [account]);
 
+  // A tab nobody is looking at does not read the chain; it catches up when it is shown again.
   useEffect(() => {
     refresh();
-    const poll = setInterval(refresh, 10_000);
+    const whenVisible = () => !document.hidden && refresh();
+    const poll = setInterval(whenVisible, 10_000);
     const clock = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
+    document.addEventListener("visibilitychange", whenVisible);
     return () => {
       clearInterval(poll);
       clearInterval(clock);
+      document.removeEventListener("visibilitychange", whenVisible);
     };
   }, [refresh]);
 

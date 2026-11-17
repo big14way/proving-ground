@@ -97,6 +97,8 @@ export function DeskWindow({ snapshot, clients, onConnect, refresh, now, tab, se
       const hash = await job(clients);
       setStatus({ tone: "good", title: "Done", text: `${label}.`, hash: hash ?? undefined });
       refresh();
+      // The public endpoint can lag a block behind the wallet's, so look once more shortly after.
+      setTimeout(refresh, 2500);
     } catch (error) {
       setStatus({ tone: "bad", title: "Refused", text: actions.explain(error) });
     } finally {
@@ -107,6 +109,12 @@ export function DeskWindow({ snapshot, clients, onConnect, refresh, now, tab, se
   const openShadows = shadows.filter((s) => s.status === "open");
   const liveVaults = vaults.filter((v) => v.closedAt === 0);
   const canOpen = !account || account.activeShadow === 0;
+
+  // An address may run one shadow at a time: once it has one, the form to open gives way to that shadow.
+  const activeShadow = account?.activeShadow ?? 0;
+  useEffect(() => {
+    if (tab === "new" && activeShadow !== 0) setTab(`s${activeShadow}`);
+  }, [tab, activeShadow]);
 
   return (
     <div className="window">
@@ -276,10 +284,13 @@ export function DeskWindow({ snapshot, clients, onConnect, refresh, now, tab, se
       </div>
 
       {/* Two live notes that fade in as the desk is scrolled through. */}
-      <motion.div className="toast" style={{ opacity: noticeA }}>
-        <span className="mono sq">Price check</span>
-        <p>{drift === null ? "Average still filling" : `${Math.abs(drift)} ticks off: ${priceOk ? "moves allowed" : "moves refused"}`}</p>
-      </motion.div>
+      {/* The first sits over the corner where a result is reported, so it steps aside while one is showing. */}
+      {!status && (
+        <motion.div className="toast" style={{ opacity: noticeA }}>
+          <span className="mono sq">Price check</span>
+          <p>{drift === null ? "Average still filling" : `${Math.abs(drift)} ticks off: ${priceOk ? "moves allowed" : "moves refused"}`}</p>
+        </motion.div>
+      )}
       <motion.div className="toast second" style={{ opacity: noticeB }}>
         <span className="mono sq">Latest block</span>
         <p>

@@ -626,6 +626,7 @@ h2 {
   right: -34px;
   bottom: 64px;
   z-index: 3;
+  pointer-events: none;
   max-width: 300px;
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
   padding: 12px 16px;

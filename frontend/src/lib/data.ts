@@ -383,6 +383,33 @@ export async function loadSnapshot(client: PublicClient, account: Address | null
 export type Point = { time: number; value: number; benchmark: number; hold: number };
 
 /**
+ * Moments to sample between `start` and `end`, on a fixed grid of seconds. A later, longer window lands
+ * on the same moments again, so what was read before can be reused instead of asked for again.
+ */
+function gridTimes(start: number, end: number, points: number): number[] {
+  let step = 1;
+  while ((end - start) / step > points) step *= 2;
+  const times = [start];
+  for (let t = Math.ceil((start + 1) / step) * step; t < end; t += step) times.push(t);
+  times.push(end);
+  return times;
+}
+
+/** What a past block held never changes, so each answer is kept for the life of the page. */
+const past = new Map<string, Point>();
+
+async function remembered(key: string, read: () => Promise<Point | null>): Promise<Point | null> {
+  const known = past.get(key);
+  if (known) return known;
+  const point = await read().catch(() => null);
+  if (point) {
+    if (past.size > 4000) past.clear();
+    past.set(key, point);
+  }
+  return point;
+}
+
+/**
  * A shadow's value over its life, read by asking the hook for the score at past blocks.
  * Uses the value at the pool price of the time, which is available from the block the shadow opened.
  */
@@ -397,16 +424,16 @@ export async function loadShadowHistory(
   if (end <= start) return [];
   // Blocks on this chain are one second apart.
   const blockAt = (time: number) => pool.block - BigInt(pool.timestamp - time);
-  const times = Array.from({ length: points }, (_, i) => Math.round(start + ((end - start) * i) / (points - 1)));
   const results = await Promise.all(
-    times.map((time) =>
-      client
-        .readContract({ ...hook, functionName: "scoreAtSpot", args: [BigInt(shadow.id)], blockNumber: blockAt(time) })
-        .then((raw) => {
-          const s = toScore(raw as unknown as RawScore);
-          return { time, value: s.nav, benchmark: s.navBenchmark, hold: s.navHold };
-        })
-        .catch(() => null),
+    gridTimes(start, end, points).map((time) =>
+      remembered(`s${shadow.id}:${time}`, () =>
+        client
+          .readContract({ ...hook, functionName: "scoreAtSpot", args: [BigInt(shadow.id)], blockNumber: blockAt(time) })
+          .then((raw) => {
+            const s = toScore(raw as unknown as RawScore);
+            return { time, value: s.nav, benchmark: s.navBenchmark, hold: s.navHold };
+          }),
+      ),
     ),
   );
   return results.filter((p): p is Point => p !== null);
@@ -423,16 +450,16 @@ export async function loadVaultHistory(
   const start = row.openedAt + 1;
   if (end <= start) return [];
   const blockAt = (time: number) => pool.block - BigInt(pool.timestamp - time);
-  const times = Array.from({ length: points }, (_, i) => Math.round(start + ((end - start) * i) / (points - 1)));
   const results = await Promise.all(
-    times.map((time) =>
-      client
-        .readContract({ ...vault, functionName: "standing", args: [BigInt(row.id)], blockNumber: blockAt(time) })
-        .then((raw) => {
-          const st = raw as unknown as { nav: bigint; navBenchmark: bigint };
-          return { time, value: toNumber(st.nav), benchmark: toNumber(st.navBenchmark), hold: 0 };
-        })
-        .catch(() => null),
+    gridTimes(start, end, points).map((time) =>
+      remembered(`v${row.id}:${time}`, () =>
+        client
+          .readContract({ ...vault, functionName: "standing", args: [BigInt(row.id)], blockNumber: blockAt(time) })
+          .then((raw) => {
+            const st = raw as unknown as { nav: bigint; navBenchmark: bigint };
+            return { time, value: toNumber(st.nav), benchmark: toNumber(st.navBenchmark), hold: 0 };
+          }),
+      ),
     ),
   );
   return results.filter((p): p is Point => p !== null);
@@ -446,23 +473,23 @@ export function rangeLabel(tickLower: number, tickUpper: number): { low: number;
 export async function loadPriceHistory(client: PublicClient, pool: Pool, seconds = 1800, points = 36): Promise<Point[]> {
   const blockAt = (time: number) => pool.block - BigInt(pool.timestamp - time);
   const start = pool.timestamp - seconds;
-  const times = Array.from({ length: points }, (_, i) => Math.round(start + (seconds * i) / (points - 1)));
   const results = await Promise.all(
-    times.map((time) =>
-      client
-        .readContract({
-          address: addresses.poolManager,
-          abi: poolManagerAbi,
-          functionName: "extsload",
-          args: [slotHex(0n)],
-          blockNumber: blockAt(time),
-        })
-        .then((word) => {
-          const { sqrtPriceX96 } = decodeSlot0(word);
-          if (sqrtPriceX96 === 0n) return null;
-          return { time, value: sqrtPriceX96ToPrice(sqrtPriceX96), benchmark: 0, hold: 0 };
-        })
-        .catch(() => null),
+    gridTimes(start, pool.timestamp, points).map((time) =>
+      remembered(`p:${time}`, () =>
+        client
+          .readContract({
+            address: addresses.poolManager,
+            abi: poolManagerAbi,
+            functionName: "extsload",
+            args: [slotHex(0n)],
+            blockNumber: blockAt(time),
+          })
+          .then((word) => {
+            const { sqrtPriceX96 } = decodeSlot0(word);
+            if (sqrtPriceX96 === 0n) return null;
+            return { time, value: sqrtPriceX96ToPrice(sqrtPriceX96), benchmark: 0, hold: 0 };
+          }),
+      ),
     ),
   );
   return results.filter((p): p is Point => p !== null);
