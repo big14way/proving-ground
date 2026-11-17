@@ -194,9 +194,9 @@ Open shadows add nothing to a swap; the test asserts the two figures are equal. 
 
 | Vault operation | Gas |
 |---|---|
-| Deposit | 242,857 (259,957 for an address's first shares) |
-| Withdraw | 167,200 |
-| Rebalance with a swap | 476,650 |
+| Deposit | 242,860 (259,960 for an address's first shares) |
+| Withdraw | 167,197 |
+| Rebalance with a swap | 476,681 |
 | Settle the fee | 154,055 |
 
 The figures in both tables are written to `snapshots/` by the tests, so a change shows up in a diff.
@@ -245,6 +245,23 @@ forge test -vv
 
 Requires [Foundry](https://book.getfoundry.sh/). Compiles with solc 0.8.30, `via_ir`, EVM version cancun. 215 tests, including three invariant properties.
 
+### Coverage
+
+```bash
+forge coverage --ir-minimum --no-match-coverage "(test|script|lib)/" --no-match-test test_contractsFitTheSizeLimit
+```
+
+| File | Lines | Statements | Branches | Functions |
+|---|---|---|---|---|
+| `ProvingGroundHook.sol` | 100.00% (245/245) | 98.96% (285/288) | 89.74% (35/39) | 100.00% (37/37) |
+| `ProvingGroundVault.sol` | 99.45% (360/362) | 97.84% (454/464) | 84.21% (64/76) | 100.00% (37/37) |
+| `Mandate.sol` | 100.00% (16/16) | 100.00% (28/28) | 100.00% (7/7) | 100.00% (4/4) |
+| `Oracle.sol` | 95.92% (47/49) | 93.94% (62/66) | 83.33% (10/12) | 100.00% (4/4) |
+| `ScoreMath.sol` | 100.00% (49/49) | 98.41% (62/63) | 88.89% (8/9) | 100.00% (10/10) |
+| **Total** | **99.45%** (717/721) | **98.02%** (891/909) | **86.71%** (124/143) | **100.00%** (92/92) |
+
+The size-limit test is left out of the coverage run because coverage compiles without the optimizer, so the contracts are larger there than the ones that ship.
+
 ### The whole story in one run
 
 ```bash
@@ -271,6 +288,8 @@ Unichain Sepolia (chain id 1301), deployed with the script above against the can
 | `ProvingGroundVault` | `0xde5922f789865e06103275Fb108618DCA6889846` |
 
 This deployment uses short periods so the whole flow can be shown in one sitting: a 5-minute price average, a 10-minute minimum shadow age, a 1-minute cooldown and a 0.001 ETH bond. The other limits are the ones used in the tests.
+
+The deployed contracts were built from the tag `testnet-v1`. Since then one internal vault function (`_enter`) was split into a per-token helper so the coverage tool can compile it; behaviour is unchanged and the hook's bytecode is identical.
 
 A demonstration pool runs on the hook, set up by `script/SetupPool.s.sol`: two test tokens that anyone can mint, priced like ETH against USD, with three overlapping liquidity positions worth about 10 million test USD.
 

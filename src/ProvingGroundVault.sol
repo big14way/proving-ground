@@ -483,6 +483,19 @@ contract ProvingGroundVault is IProvingGroundVault, IUnlockCallback, ERC6909, Re
         return abi.encode(a, b);
     }
 
+    /// @dev One token's side of an entry: the idle balance after the newcomer matches their fraction
+    /// of it (rounded up), and what the newcomer pays in total.
+    function _matchIdle(uint256 idle, uint256 fees, int256 delta, uint256 shares, uint256 supply)
+        internal
+        pure
+        returns (uint256 idleAfter, uint256 paid)
+    {
+        idle += fees;
+        uint256 matched = supply == 0 ? 0 : FullMath.mulDivRoundingUp(idle, shares, supply);
+        idleAfter = idle + matched;
+        paid = uint256(int256(fees) - delta) + matched;
+    }
+
     /// @dev Adds `call.shares` worth to the position and the idle balances, paid by `call.account`.
     /// Rounds against the newcomer. For the very first entry the shares are the liquidity.
     function _enter(Vault storage v, PoolKey memory key, Call memory call)
@@ -490,27 +503,27 @@ contract ProvingGroundVault is IProvingGroundVault, IUnlockCallback, ERC6909, Re
         returns (uint256 paid0, uint256 paid1)
     {
         uint256 supply = v.totalShares;
-        uint128 liquidity = v.liquidity;
-        uint128 added =
-            (supply == 0 ? call.shares : FullMath.mulDivRoundingUp(liquidity, call.shares, supply)).toUint128();
-
-        // One call adds the liquidity and collects the fees the position has earned so far.
-        (int256 delta0, int256 delta1, uint256 fees0, uint256 fees1) =
-            _modify(key, v, call.vaultId, int256(uint256(added)), liquidity);
+        int256 delta0;
+        int256 delta1;
+        uint256 fees0;
+        uint256 fees1;
+        {
+            uint128 liquidity = v.liquidity;
+            uint128 added =
+                (supply == 0 ? call.shares : FullMath.mulDivRoundingUp(liquidity, call.shares, supply)).toUint128();
+            // One call adds the liquidity and collects the fees the position has earned so far.
+            (delta0, delta1, fees0, fees1) = _modify(key, v, call.vaultId, int256(uint256(added)), liquidity);
+            v.liquidity = liquidity + added;
+        }
 
         // The fees join the idle balances before the newcomer matches their fraction of them.
-        uint256 idle0 = v.idle0 + fees0;
-        uint256 idle1 = v.idle1 + fees1;
-        uint256 match0 = supply == 0 ? 0 : FullMath.mulDivRoundingUp(idle0, call.shares, supply);
-        uint256 match1 = supply == 0 ? 0 : FullMath.mulDivRoundingUp(idle1, call.shares, supply);
         // `delta` is what the pool owes the vault: the fees, less what the new liquidity costs.
-        paid0 = uint256(int256(fees0) - delta0) + match0;
-        paid1 = uint256(int256(fees1) - delta1) + match1;
+        uint256 idle;
+        (idle, paid0) = _matchIdle(v.idle0, fees0, delta0, call.shares, supply);
+        v.idle0 = idle.toUint128();
+        (idle, paid1) = _matchIdle(v.idle1, fees1, delta1, call.shares, supply);
+        v.idle1 = idle.toUint128();
         if (paid0 > call.limit0 || paid1 > call.limit1) revert SlippageExceeded();
-
-        v.liquidity = liquidity + added;
-        v.idle0 = (idle0 + match0).toUint128();
-        v.idle1 = (idle1 + match1).toUint128();
 
         _pull(key.currency0, call.account, paid0);
         _pull(key.currency1, call.account, paid1);
