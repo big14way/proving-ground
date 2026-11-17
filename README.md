@@ -289,7 +289,7 @@ Unichain Sepolia (chain id 1301), deployed with the script above against the can
 
 This deployment uses short periods so the whole flow can be shown in one sitting: a 5-minute price average, a 10-minute minimum shadow age, a 1-minute cooldown and a 0.001 ETH bond. The other limits are the ones used in the tests.
 
-The deployed contracts were built from the tag `testnet-v1`. Since then one internal vault function (`_enter`) was split into a per-token helper so the coverage tool can compile it; behaviour is unchanged and the hook's bytecode is identical.
+Both contracts are source-verified from the tag `testnet-v1`, which reproduces the deployed bytecode exactly: on [Blockscout](https://unichain-sepolia.blockscout.com/address/0x317a059533Ceb38aB84a5e7887eB311676d3d080?tab=contract) ([vault](https://unichain-sepolia.blockscout.com/address/0xde5922f789865e06103275Fb108618DCA6889846?tab=contract)) and on [Sourcify](https://repo.sourcify.dev/1301/0x317a059533Ceb38aB84a5e7887eB311676d3d080) ([vault](https://repo.sourcify.dev/1301/0xde5922f789865e06103275Fb108618DCA6889846)). Since then one internal vault function (`_enter`) was split into a per-token helper so the coverage tool can compile it; behaviour is unchanged and the hook's bytecode is identical.
 
 A demonstration pool runs on the hook, set up by `script/SetupPool.s.sol`: two test tokens that anyone can mint, priced like ETH against USD, with three overlapping liquidity positions worth about 10 million test USD.
 
