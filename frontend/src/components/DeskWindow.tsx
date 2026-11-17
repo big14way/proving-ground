@@ -106,6 +106,12 @@ export function DeskWindow({ snapshot, clients, onConnect, refresh, now, tab, se
     }
   };
 
+  // A result belongs to the tab it happened on: choosing another tab clears it, unless something is still under way.
+  const pick = (id: TabId) => {
+    setTab(id);
+    if (!busy) setStatus(null);
+  };
+
   const openShadows = shadows.filter((s) => s.status === "open");
   const liveVaults = vaults.filter((v) => v.closedAt === 0);
   const canOpen = !account || account.activeShadow === 0;
@@ -129,16 +135,16 @@ export function DeskWindow({ snapshot, clients, onConnect, refresh, now, tab, se
             <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden style={{ flexShrink: 0 }}>
               <rect width="14" height="14" fill="var(--ink)" />
             </svg>
-            <Tab id="market" tab={tab} setTab={setTab} label="Market" />
+            <Tab id="market" tab={tab} setTab={pick} label="Market" />
             {liveVaults.map((v) => (
-              <Tab key={v.id} id={`v${v.id}`} tab={tab} setTab={setTab} label={`Vault ${pad(v.id)}`} />
+              <Tab key={v.id} id={`v${v.id}`} tab={tab} setTab={pick} label={`Vault ${pad(v.id)}`} />
             ))}
             {openShadows.map((s) => (
-              <Tab key={s.id} id={`s${s.id}`} tab={tab} setTab={setTab} label={`Shadow ${pad(s.id)}`} />
+              <Tab key={s.id} id={`s${s.id}`} tab={tab} setTab={pick} label={`Shadow ${pad(s.id)}`} />
             ))}
-            {shadow && shadow.status !== "open" && <Tab id={tab} tab={tab} setTab={setTab} label={`Shadow ${pad(shadow.id)}`} />}
-            <Tab id="record" tab={tab} setTab={setTab} label="Record" />
-            {canOpen && <Tab id="new" tab={tab} setTab={setTab} label="New shadow" />}
+            {shadow && shadow.status !== "open" && <Tab id={tab} tab={tab} setTab={pick} label={`Shadow ${pad(shadow.id)}`} />}
+            <Tab id="record" tab={tab} setTab={pick} label="Record" />
+            {canOpen && <Tab id="new" tab={tab} setTab={pick} label="New shadow" />}
           </div>
           <div className="bar-right">
             {account && (
@@ -160,7 +166,7 @@ export function DeskWindow({ snapshot, clients, onConnect, refresh, now, tab, se
         </div>
 
         {tab === "record" ? (
-          <RecordTable snapshot={snapshot} now={now} setTab={setTab} />
+          <RecordTable snapshot={snapshot} now={now} setTab={pick} />
         ) : (
           <div className="panes">
             <div className="left">

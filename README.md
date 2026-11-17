@@ -323,7 +323,7 @@ One page, reading the testnet deployment directly (no backend):
 
 Add `?as=<address>` to the URL to see the page as that address sees it, read-only, without connecting a wallet.
 
-The page has been run end to end with a browser wallet (MetaMask) on the testnet: minting test tokens, a swap, opening a shadow, an EIP-712 signed move, going live with a stake, and the refusal shown while a shadow's score is below the line. That run produced the second curator on the record (shadow 3, now vault 3): a narrow range that fell behind the passive position when the price rose through it, was re-centred by a signed move, and went live once its score was back above zero.
+The page has been run end to end with a browser wallet (MetaMask) on the testnet: minting test tokens, a swap, opening a shadow, an EIP-712 signed move, going live with a stake, a deposit into another curator's vault, and the refusal shown while a shadow's score is below the line. That run produced the second curator on the record (shadow 3, now vault 3): a narrow range that fell behind the passive position when the price rose through it, was re-centred by a signed move, and went live once its score was back above zero.
 
 Reads go to the chain's public endpoint. Calls made in the same moment travel as one request, answers for past blocks are kept, a hidden tab stops reading, and a second public endpoint takes over if the first turns a request away.
 
