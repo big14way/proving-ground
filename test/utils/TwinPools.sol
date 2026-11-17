@@ -17,6 +17,7 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {FixedPoint96} from "@uniswap/v4-core/src/libraries/FixedPoint96.sol";
+import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 
 import {ProvingGroundHook} from "../../src/ProvingGroundHook.sol";
 import {ProvingGroundVault} from "../../src/ProvingGroundVault.sol";
@@ -75,6 +76,19 @@ abstract contract TwinPools is BaseTest {
         uint128 liquidityScale,
         IProvingGround.Config memory config
     ) internal {
+        _setUpTwinWith(FEE, TS, decimals0, decimals1, centerTick, liquidityScale, config);
+    }
+
+    /// @dev The same pair of pools at another fee tier and tick spacing.
+    function _setUpTwinWith(
+        uint24 fee,
+        int24 spacing,
+        uint8 decimals0,
+        uint8 decimals1,
+        int24 centerTick,
+        uint128 liquidityScale,
+        IProvingGround.Config memory config
+    ) internal {
         deployArtifactsAndLabel();
         (c0, c1) = _deployPair(decimals0, decimals1);
         (curator, curatorKey) = makeAddrAndKey("curator");
@@ -89,8 +103,8 @@ abstract contract TwinPools is BaseTest {
         unit0 = FullMath.mulDiv(liquidityScale, FixedPoint96.Q96, sqrtCenter);
         unit1 = FullMath.mulDiv(liquidityScale, sqrtCenter, FixedPoint96.Q96);
 
-        keyA = PoolKey(c0, c1, FEE, TS, IHooks(address(hook)));
-        keyB = PoolKey(c0, c1, FEE, TS, IHooks(address(0)));
+        keyA = PoolKey(c0, c1, fee, spacing, IHooks(address(hook)));
+        keyB = PoolKey(c0, c1, fee, spacing, IHooks(address(0)));
         idA = keyA.toId();
         idB = keyB.toId();
         poolManager.initialize(keyA, sqrtCenter);
@@ -297,6 +311,45 @@ abstract contract TwinPools is BaseTest {
             bool zeroForOne = tick > center + 150 ? true : tick < center - 150 ? false : h & 1 == 1;
             _swapBoth(zeroForOne, 0.5e18 + (h >> 8) % 8e18);
         }
+    }
+
+    // ------------------------------------------------------------------ the real position on pool B
+
+    uint256 internal tokenId;
+    uint128 internal realLiquidity;
+    uint256 internal idle0;
+    uint256 internal idle1;
+
+    /// @dev Moves the real position the way a vault would: withdraw, swap through the pool to the
+    /// mix the new range needs, deposit. The swap pays the pool fee and moves the price.
+    function _realRebalance(int24 lo, int24 hi) internal {
+        BalanceDelta d = positionManager.decreaseLiquidity(
+            tokenId, realLiquidity, 0, 0, address(this), vm.getBlockTimestamp() + 1, ""
+        );
+        uint256 x0 = idle0 + uint128(d.amount0());
+        uint256 x1 = idle1 + uint128(d.amount1());
+
+        (uint160 sqrtP,,,) = poolManager.getSlot0(idB);
+        uint160 sLo = TickMath.getSqrtPriceAtTick(lo);
+        uint160 sHi = TickMath.getSqrtPriceAtTick(hi);
+        (uint256 r0, uint256 r1) = LiquidityAmounts.getAmountsForLiquidity(sqrtP, sLo, sHi, 1e18);
+        uint256 need0 = FullMath.mulDiv(r0, _in1(x0, sqrtP) + x1, _in1(r0, sqrtP) + r1);
+
+        uint256 b0 = c0.balanceOf(address(this));
+        uint256 b1 = c1.balanceOf(address(this));
+        if (x0 > need0) _swap(keyB, true, x0 - need0);
+        else if (need0 > x0) _swap(keyB, false, _in1(need0 - x0, sqrtP));
+        x0 = x0 + c0.balanceOf(address(this)) - b0;
+        x1 = x1 + c1.balanceOf(address(this)) - b1;
+
+        (sqrtP,,,) = poolManager.getSlot0(idB);
+        realLiquidity = LiquidityAmounts.getLiquidityForAmounts(sqrtP, sLo, sHi, x0, x1);
+        BalanceDelta m;
+        (tokenId, m) = _mint(keyB, lo, hi, realLiquidity);
+        uint256 used0 = uint128(-m.amount0());
+        uint256 used1 = uint128(-m.amount1());
+        idle0 = x0 > used0 ? x0 - used0 : 0;
+        idle1 = x1 > used1 ? x1 - used1 : 0;
     }
 
     function _in1(uint256 amount0, uint160 sqrtP) internal pure returns (uint256) {

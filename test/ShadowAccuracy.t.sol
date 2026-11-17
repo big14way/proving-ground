@@ -11,7 +11,6 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
-import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 
 import {IProvingGround} from "../src/interfaces/IProvingGround.sol";
 
@@ -31,12 +30,6 @@ abstract contract AccuracySuite is TwinPools {
     int256 internal constant RAW_FEE_LOWER_PPM = -1_000;
     uint256 internal constant VALUE_LIMIT_PPM = 1_000; // 10 bps after two rebalances
     uint256 internal constant BENCHMARK_LIMIT_PPM = 10_000; // within 1.0%
-
-    // The real position on pool B.
-    uint256 internal tokenId;
-    uint128 internal realLiquidity;
-    uint256 internal idle0;
-    uint256 internal idle1;
 
     /// @dev A rebalance reads the time-weighted price, so the pools start one oracle window old.
     function _setUpAccuracy(uint8 decimals0, uint8 decimals1, int24 centerTick, uint128 liquidityScale) internal {
@@ -114,38 +107,6 @@ abstract contract AccuracySuite is TwinPools {
     }
 
     // ------------------------------------------------------------------ value across rebalances
-
-    /// @dev Moves the real position the way a vault would: withdraw, swap through the pool to the
-    /// mix the new range needs, deposit. The swap pays the pool fee and moves the price.
-    function _realRebalance(int24 lo, int24 hi) internal {
-        BalanceDelta d = positionManager.decreaseLiquidity(
-            tokenId, realLiquidity, 0, 0, address(this), vm.getBlockTimestamp() + 1, ""
-        );
-        uint256 x0 = idle0 + uint128(d.amount0());
-        uint256 x1 = idle1 + uint128(d.amount1());
-
-        (uint160 sqrtP,,,) = poolManager.getSlot0(idB);
-        uint160 sLo = TickMath.getSqrtPriceAtTick(lo);
-        uint160 sHi = TickMath.getSqrtPriceAtTick(hi);
-        (uint256 r0, uint256 r1) = LiquidityAmounts.getAmountsForLiquidity(sqrtP, sLo, sHi, 1e18);
-        uint256 need0 = FullMath.mulDiv(r0, _in1(x0, sqrtP) + x1, _in1(r0, sqrtP) + r1);
-
-        uint256 b0 = c0.balanceOf(address(this));
-        uint256 b1 = c1.balanceOf(address(this));
-        if (x0 > need0) _swap(keyB, true, x0 - need0);
-        else if (need0 > x0) _swap(keyB, false, _in1(need0 - x0, sqrtP));
-        x0 = x0 + c0.balanceOf(address(this)) - b0;
-        x1 = x1 + c1.balanceOf(address(this)) - b1;
-
-        (sqrtP,,,) = poolManager.getSlot0(idB);
-        realLiquidity = LiquidityAmounts.getLiquidityForAmounts(sqrtP, sLo, sHi, x0, x1);
-        BalanceDelta m;
-        (tokenId, m) = _mint(keyB, lo, hi, realLiquidity);
-        uint256 used0 = uint128(-m.amount0());
-        uint256 used1 = uint128(-m.amount1());
-        idle0 = x0 > used0 ? x0 - used0 : 0;
-        idle1 = x1 > used1 ? x1 - used1 : 0;
-    }
 
     function _recenterBoth(uint256 shadowId) internal {
         (, int24 tick,,) = poolManager.getSlot0(idA);

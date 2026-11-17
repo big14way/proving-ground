@@ -1,0 +1,26 @@
+{
+  "chainId": 130,
+  "chain": "Unichain mainnet",
+  "poolManager": "0x1F98400000000000000000000000000000000004",
+  "poolId": "0x3258f413c7a88cda2fa8709a589d221a80f6574f63df5a5b6774485d8acc39d9",
+  "pool": {
+    "currency0": "ETH (native)",
+    "currency1": "USDC",
+    "fee": 500,
+    "tickSpacing": 10,
+    "hooks": "none"
+  },
+  "fromBlock": 63575200,
+  "toBlock": 64180000,
+  "firstSwapBlock": 63575207,
+  "lastSwapBlock": 64179981,
+  "firstSwapTime": 1794323566,
+  "lastSwapTime": 1794928340,
+  "swaps": 76429,
+  "volumeEth": 4504.8,
+  "volumeUsdc": 8488005.87,
+  "lowestSqrtPriceX96": "3278392214153695072354304",
+  "highestSqrtPriceX96": "3630903326874490653114368",
+  "recordBytes": 24,
+  "sha256": "127e4ca542023d153f1804ca0bd81ab8fe349a03a12a1aff04bd6d3cc666e8d5"
+}

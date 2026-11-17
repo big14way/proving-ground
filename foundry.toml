@@ -8,6 +8,9 @@ optimizer_runs = 200
 solc_version = "0.8.30"
 src = "src"
 via_ir = true
+# The real-flow replay reads a recorded price path, and replays tens of thousands of swaps in one test.
+fs_permissions = [{ access = "read", path = "./test/data" }]
+gas_limit = "18446744073709551615"
 
 [profile.default.invariant]
 runs = 24

@@ -38,7 +38,7 @@ const QUESTIONS = [
   },
   {
     q: "How close is the score to a real position?",
-    a: "In the twin-pool tests, where an identical pool holds the same position for real, the conservative fee figure is within one percent at the supported size, and value after two rebalances is within three basis points.",
+    a: "It is checked against an identical pool that holds the same position with real tokens. On synthetic swaps the conservative fee figure is within one percent at the supported size. On a replay of 76,428 real Unichain swaps, with the pool kept at market prices, the shadow's value after thirteen moves was within two basis points of the real position's. If traders are instead assumed to swap the same amounts, the score comes out up to 1.6 percent of fees below the real position: it errs against the curator.",
   },
   {
     q: "What stops a curator from gaming it?",
@@ -540,14 +540,14 @@ export default function App() {
             <img className="photo" src="/photos/proof-earth.jpg" alt="City lights on Earth at night, seen from orbit" />
             <div className="pinned" style={{ left: "6%", top: "44%" }}>
               <span className="mono sq">Tests passing</span>
-              <b>215</b>
+              <b>222</b>
             </div>
             <div className="pinned" style={{ left: "20%", top: "32%" }}>
-              <span className="mono sq">Fee error at 1% size</span>
-              <b>under 1%</b>
+              <span className="mono sq">Real swaps replayed</span>
+              <b>76,428</b>
             </div>
             <div className="pinned" style={{ left: "44%", top: "22%" }}>
-              <span className="mono sq">Added to a swap</span>
+              <span className="mono sq">Added to a swap, after a block's first</span>
               <b>7,300 gas</b>
             </div>
             <div className="pinned" style={{ left: "68%", top: "17%" }}>
@@ -557,11 +557,11 @@ export default function App() {
           </div>
           <div className="quote">
             <p>
-              “At the supported size, the conservative score sits within one percent of what a real position earned from
-              the same swaps.”
+              “Replayed on a week of real Unichain swaps, the shadow's value after thirteen moves was within two basis
+              points of a real position's.”
             </p>
-            Twin-pool accuracy suite
-            <span>Two identical pools, one position real, one a shadow</span>
+            Real-flow replay, twin pools held at the same prices
+            <span>76,428 ETH/USDC swaps, 10 to 17 November 2026, ETH down 13%</span>
           </div>
         </div>
 

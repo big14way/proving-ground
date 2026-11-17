@@ -20,6 +20,7 @@ Built for the Uniswap Hook Incubator UHI11 Hookathon, themed track: Active Manag
 | Live rebalancing through the pool, with a loss limit | Built, tested |
 | Performance fee, paid only above a high-water mark against the passive benchmark | Built, tested |
 | Invariant tests over random sequences of actions | Built, passing |
+| Accuracy against a real position on a week of real Unichain swaps (76,428) | Measured, tested |
 | Testnet deployment with a demonstration pool | Live on Unichain Sepolia |
 | Frontend: the record, a shadow's chart, vaults, the mandate, the curator's desk | Built, run against the testnet |
 
@@ -141,7 +142,7 @@ Two pools receive exactly the same swaps:
 - **Pool A** has the hook, and a shadow position.
 - **Pool B** is identical, has no hook, and holds the same position with real tokens.
 
-Pool B is the ground truth. Each test compares what the hook reports for the shadow against what the real position actually did. The whole suite runs on three token pairs: two 18-decimal tokens at a price of 1, a 6-decimal against an 18-decimal token priced like a 3,000 USD asset, and the same pair the other way round.
+Pool B is the ground truth. Each test compares what the hook reports for the shadow against what the real position actually did. The swaps are synthetic in the first three sections below and real in the fourth. The whole suite runs on three token pairs: two 18-decimal tokens at a price of 1, a 6-decimal against an 18-decimal token priced like a 3,000 USD asset, and the same pair the other way round.
 
 ### Fee accuracy
 
@@ -177,6 +178,43 @@ The benchmark is a virtual full-range position. Pool B holds that position for r
 |---|---|---|
 | Price stays in range | below 0.0001% | +0.016% |
 | Price trends away | below 0.0001% | +0.033% |
+
+### On real swaps
+
+`test/RealFlowReplay.t.sol` runs the comparison on a price path that actually happened: every swap of the ETH/USDC 0.05% pool on Unichain mainnet (Uniswap v4, pool id `0x3258f413…39d9`) between blocks 63,575,200 and 64,180,000, which is 10 to 17 November 2026. That is 76,429 swaps and 8.49 million USDC of volume, in a week when ETH fell 13%, from 2,078 to 1,803 USDC, ranging between 1,712 and 2,100.
+
+The twin pools are set up like that pool: the same fee and tick spacing, an 18-decimal token against a 6-decimal one, starting at the real pool's price. Pool A is then taken through the recorded prices one swap at a time, so it makes one swap for each real swap, in the same direction, ending at the same price, with the real number of seconds between them. The first record sets the starting price, so 76,428 swaps are replayed. The pools' depth is the test's own, not the real pool's, so each swap's size is whatever moves this pool to that price.
+
+"What would have happened had the position been real" has two honest answers, and pool B is run both ways:
+
+- **The same prices.** Arbitrage keeps the pool at the market price, so the extra liquidity means more volume flows. This is the natural reading for a pair like ETH/USDC, whose price is set elsewhere.
+- **The same trades.** Every trader swaps the same amount, and the extra liquidity dampens the price.
+
+Fees of a shadow holding one range, 3% either side of the starting price, against the real position. The price was inside that range for 17% of the swaps:
+
+| Shadow size | Same prices: raw | Same prices: conservative | Same trades: raw | Same trades: conservative |
+|---|---|---|---|---|
+| 0.1% | below 0.0001% | −0.10% | −0.06% | −0.16% |
+| 1% | below 0.0001% | −0.99% | −0.62% | −1.60% |
+
+Value of a shadow at 1% size that re-centres its 3% range every time the price leaves it, 13 moves over the week, against a real position that withdraws, swaps through the pool and deposits each time:
+
+| | Raw value | Conservative value |
+|---|---|---|
+| Same prices | −1.9 bps | −19.0 bps |
+| Same trades | −14.7 bps | −31.9 bps |
+
+Reading:
+
+- With the pool at the same prices the raw fee figure is exact to within a millionth. It should be: the figure is read from the pool's own fee accounting. The value after 13 real rebalances is the stronger result, because it tests the modelled cost of each move against a real swap: 1.9 bps off at the end of the week, and never more than 7.4 bps off at the four earlier points measured (after 1,500, 5,000, 20,000 and 45,000 swaps).
+- With the same trades, both figures come out below the real position. Real liquidity slows the price down, so a real position stays in range a little longer than the pool the shadow reads from. At the size cap the conservative figure is 1.6% of fees below over the week, and 2.2% below over its first 5,000 swaps. That is outside the ±1.0% the synthetic suite enforces, and it is the one place the real path disagrees with it. The error scales with the shadow's share of the pool and it counts against the curator.
+- In every full-week run above, the conservative figure is at or below the real position's.
+
+What the score said about that week: holding the 3% range scored −491 bps against the passive position, and re-centring it scored −189 bps. Neither would have reached the line to go live.
+
+The tests enforce: raw fees within 0.1% with the pool at the same prices; with the same trades, conservative fees no more than three times the shadow's share below the real position's and no more than 1.0% above; raw value within 10 bps after the re-centring run with the pool at the same prices.
+
+The recorded path is `test/data/unichain-eth-usdc.bin`, with its source and SHA-256 in the `.json` beside it, and `test_recordedPath_matchesItsManifest` checks one against the other. `python3 script/replay/fetch_swaps.py` rebuilds it from the chain. It reads the chain's own endpoint by default, which takes over an hour; the copy in this repo was read through a public gateway (`--rpc https://unichain.gateway.tenderly.co --span 10000`) and matched the chain's own endpoint on the 41 ranges, 3,505 swaps, fetched from both. `REPLAY_SWAPS=5000 forge test --match-contract RealFlowReplay -vv` replays only the first 5,000.
 
 ### Gas
 
@@ -214,7 +252,8 @@ At the end of every run everyone redeems everything. The vault must pay it all o
 
 ### Limits of these tests and of the design so far
 
-- Synthetic swap flow, one pool configuration (0.3% fee, tick spacing 60, three overlapping liquidity providers), 300 swaps per run.
+- The synthetic suite uses one pool configuration (0.3% fee, tick spacing 60, three overlapping liquidity providers) and 300 swaps per run. The real-flow replay uses one pool's one week, and the test's own liquidity rather than the real pool's.
+- On the real path, with traders swapping the same amounts, the conservative fee figure fell up to 2.2% below the real position's at the size cap, outside the ±1.0% the synthetic suite enforces (see [On real swaps](#on-real-swaps)).
 - The score is an estimate, not a proof. That is why both the raw and the conservative figures are published, and why shadow size is capped.
 - The rebalance cost model ignores any protocol fee.
 - The raw value does not compound the extra fees of finished legs.
@@ -243,12 +282,12 @@ cd proving-ground
 forge test -vv
 ```
 
-Requires [Foundry](https://book.getfoundry.sh/). Compiles with solc 0.8.30, `via_ir`, EVM version cancun. 215 tests, including three invariant properties.
+Requires [Foundry](https://book.getfoundry.sh/). Compiles with solc 0.8.30, `via_ir`, EVM version cancun. 222 tests, including three invariant properties and a replay of 76,428 real swaps. The replay makes the full run take about 20 seconds.
 
 ### Coverage
 
 ```bash
-FORGE_SNAPSHOT_EMIT=false forge coverage --ir-minimum --no-match-coverage "(test|script|lib)/" --no-match-test test_contractsFitTheSizeLimit
+REPLAY_SWAPS=2000 FORGE_SNAPSHOT_EMIT=false forge coverage --ir-minimum --no-match-coverage "(test|script|lib)/" --no-match-test test_contractsFitTheSizeLimit
 ```
 
 | File | Lines | Statements | Branches | Functions |
@@ -260,7 +299,7 @@ FORGE_SNAPSHOT_EMIT=false forge coverage --ir-minimum --no-match-coverage "(test
 | `ScoreMath.sol` | 100.00% (49/49) | 98.41% (62/63) | 88.89% (8/9) | 100.00% (10/10) |
 | **Total** | **99.45%** (717/721) | **98.02%** (891/909) | **86.71%** (124/143) | **100.00%** (92/92) |
 
-The size-limit test is left out of the coverage run because coverage compiles without the optimizer, so the contracts are larger there than the ones that ship. For the same reason `FORGE_SNAPSHOT_EMIT=false` keeps the run from overwriting the gas snapshots.
+The size-limit test is left out of the coverage run because coverage compiles without the optimizer, so the contracts are larger there than the ones that ship. For the same reason `FORGE_SNAPSHOT_EMIT=false` keeps the run from overwriting the gas snapshots. `REPLAY_SWAPS=2000` shortens the real-flow replay, which is slow without the optimizer and adds nothing to coverage.
 
 ### The whole story in one run
 
@@ -289,7 +328,7 @@ Unichain Sepolia (chain id 1301), deployed with the script above against the can
 
 This deployment uses short periods so the whole flow can be shown in one sitting: a 5-minute price average, a 10-minute minimum shadow age, a 1-minute cooldown and a 0.001 ETH bond. The other limits are the ones used in the tests.
 
-Both contracts are source-verified from the tag `testnet-v1`, which reproduces the deployed bytecode exactly: on [Blockscout](https://unichain-sepolia.blockscout.com/address/0x317a059533Ceb38aB84a5e7887eB311676d3d080?tab=contract) ([vault](https://unichain-sepolia.blockscout.com/address/0xde5922f789865e06103275Fb108618DCA6889846?tab=contract)) and on [Sourcify](https://repo.sourcify.dev/1301/0x317a059533Ceb38aB84a5e7887eB311676d3d080) ([vault](https://repo.sourcify.dev/1301/0xde5922f789865e06103275Fb108618DCA6889846)). Since then one internal vault function (`_enter`) was split into a per-token helper so the coverage tool can compile it; behaviour is unchanged and the hook's bytecode is identical.
+Both contracts are source-verified from the tag `testnet-v1`, which reproduces the deployed bytecode exactly: on [Uniscan](https://sepolia.uniscan.xyz/address/0x317a059533Ceb38aB84a5e7887eB311676d3d080#code) ([vault](https://sepolia.uniscan.xyz/address/0xde5922f789865e06103275Fb108618DCA6889846#code)), on [Blockscout](https://unichain-sepolia.blockscout.com/address/0x317a059533Ceb38aB84a5e7887eB311676d3d080?tab=contract) ([vault](https://unichain-sepolia.blockscout.com/address/0xde5922f789865e06103275Fb108618DCA6889846?tab=contract)) and on [Sourcify](https://repo.sourcify.dev/1301/0x317a059533Ceb38aB84a5e7887eB311676d3d080) ([vault](https://repo.sourcify.dev/1301/0xde5922f789865e06103275Fb108618DCA6889846)). Since then one internal vault function (`_enter`) was split into a per-token helper so the coverage tool can compile it; behaviour is unchanged and the hook's bytecode is identical.
 
 A demonstration pool runs on the hook, set up by `script/SetupPool.s.sol`: two test tokens that anyone can mint, priced like ETH against USD, with three overlapping liquidity positions worth about 10 million test USD.
 
@@ -342,6 +381,7 @@ The design follows the "Halftone" trading-desk template on the Framer marketplac
 | `src/libraries/Mandate.sol` | The instruction's EIP-712 hash and the range, cooldown and price checks |
 | `src/interfaces/IProvingGround.sol`, `IProvingGroundVault.sol` | Structs, events, errors |
 | `test/ShadowAccuracy.t.sol` | Twin-pool accuracy suite, run on three token pairs |
+| `test/RealFlowReplay.t.sol`, `test/data/`, `script/replay/fetch_swaps.py` | The accuracy comparison on a week of real Unichain swaps, the recorded path, and the script that fetches it |
 | `test/ProvingGroundHook.t.sol` | Hook behaviour, guards, bonds, the one-shadow rule, dust accounting, gas |
 | `test/Mandate.t.sol` | Signed instructions and every mandate check at its limit, the price-check attack, fuzz tests |
 | `test/Vault.t.sol` | Going live, the deposit and withdrawal round trip, capacity, demotion, stake, live rebalancing, the loss limit, the performance fee, gas |
