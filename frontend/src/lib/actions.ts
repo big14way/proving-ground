@@ -63,11 +63,21 @@ async function send(c: Clients, request: Parameters<typeof c.publicClient.simula
   const { request: prepared } = await patiently(() =>
     c.publicClient.simulateContract({ ...request, account: c.account } as never),
   );
+  // Wallets tend to set the gas limit to the bare estimate, and a call whose cost shifts by a few thousand
+  // gas between the estimate and the block then runs out. The page sets the limit itself, with room to spare;
+  // gas that is not used is not paid for.
+  const estimate = await patiently(() =>
+    c.publicClient.estimateContractGas({ ...request, account: c.account } as never),
+  ).catch(() => null);
+  const gas = estimate === null ? undefined : (estimate * 13n) / 10n + 20_000n;
   // A browser wallet signs by address; a local key (the terminal script) signs with the account object.
   const account = c.walletClient.account ?? c.account;
-  const hash = await c.walletClient.writeContract({ ...prepared, account } as never);
+  const hash = await c.walletClient.writeContract({ ...prepared, account, gas } as never);
   const receipt = await c.publicClient.waitForTransactionReceipt({ hash });
-  if (receipt.status !== "success") throw new Error("The transaction was mined but failed.");
+  if (receipt.status !== "success") {
+    const spent = receipt.gasUsed >= (gas ?? 0n) && gas !== undefined;
+    throw new Error(spent ? "The transaction ran out of gas. Nothing changed; try again." : "The transaction was mined but failed. Nothing changed.");
+  }
   settledAt = Date.now();
   return hash;
 }

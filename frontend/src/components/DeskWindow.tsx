@@ -268,8 +268,8 @@ export function DeskWindow({ snapshot, clients, onConnect, refresh, now, tab, se
             <div className="right">
               {tab === "market" && <MarketForm snapshot={snapshot} busy={busy} run={run} connected={clients !== null} />}
               {tab === "new" && <OpenForm snapshot={snapshot} busy={busy} run={run} connected={clients !== null} />}
-              {shadow && <ShadowForm shadow={shadow} snapshot={snapshot} busy={busy} run={run} now={now} connected={clients !== null} />}
-              {vault && <VaultForm row={vault} snapshot={snapshot} busy={busy} run={run} now={now} connected={clients !== null} />}
+              {shadow && <ShadowForm key={shadow.id} shadow={shadow} snapshot={snapshot} busy={busy} run={run} now={now} connected={clients !== null} />}
+              {vault && <VaultForm key={vault.id} row={vault} snapshot={snapshot} busy={busy} run={run} now={now} connected={clients !== null} />}
               {status && (
                 <p className={`note ${status.tone === "bad" ? "warn" : ""}`} role="status">
                   <span className="mono sq" style={{ color: "inherit" }}>
@@ -625,7 +625,7 @@ function VaultForm({ row, snapshot, busy, run, now, connected }: FormProps & { r
           </button>
         </>
       )}
-      {mode === "move" && (
+      {mode === "move" && mine && (
         <>
           <RangePicker half={half} setHalf={setHalf} tick={pool.tick} />
           <div className="rows">
