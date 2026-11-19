@@ -26,6 +26,12 @@ Built for the Uniswap Hook Incubator UHI11 Hookathon, themed track: Active Manag
 | Testnet deployment with a demonstration pool | Live on Unichain Sepolia |
 | Frontend: the record, a shadow's chart, vaults, the mandate, the curator's desk | Built, run against the testnet |
 
+## How it compares
+
+- **Existing managers.** Liquidity managers already run on Uniswap (Arrakis and Gamma, for example). Their track records are earned with depositors' money: a depositor learns how good a strategy is by being in it.
+- **Here the record comes first.** A strategy is scored as a shadow that holds no capital, on the pool's real swaps, before it may take a single deposit. The score sets how much it may manage, and every move passes limits that no owner can change.
+- **Earlier hooks.** A search of the 759 past hookathon submissions in the organisers' [public dataset](https://github.com/AtriumAcademy/UHI-Hook-Data) (UHI1 to UHI10) found none that scores a position holding no capital, or that ties a manager's capacity to such a score.
+
 ## How the shadow score works
 
 1. A curator opens a shadow: a tick range and an amount of *virtual* liquidity. The position needs no capital; the curator only posts a small bond (see [The mandate](#the-mandate)). A shadow may be at most 1% of the pool's active liquidity, the size at which the score is validated below.

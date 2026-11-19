@@ -612,6 +612,9 @@ export default function App() {
               <a className="pill dark big" href="https://github.com/big14way/proving-ground" target="_blank" rel="noreferrer">
                 Source and tests
               </a>
+              <a className="pill dark big" href="https://youtu.be/t4v4Hac0RCU" target="_blank" rel="noreferrer">
+                Watch the demo
+              </a>
             </div>
 
             <div className="footer">
