@@ -6,6 +6,8 @@ Proving Ground is a Uniswap v4 hook for curated liquidity. A liquidity curator r
 
 Built for the Uniswap Hook Incubator UHI11 Hookathon, themed track: Active Management and Curated Liquidity.
 
+**Demo video (4:32):** https://youtu.be/t4v4Hac0RCU · **Live site:** https://provinghq.vercel.app
+
 ## Status
 
 | Part | State |
